@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import argparse
 import os
 import re
@@ -21,6 +23,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", default=None, help="Path to NeMo .nemo model for its tokenizer"
     )
+    parser.add_argument(
+        "--lang_id",
+        default=None,
+        help="Language ID to use with multilingual tokenizer (required if model has MultilingualTokenizer)",
+    )
+
     args = parser.parse_args()
 
     if not os.path.exists(args.arpa):
@@ -35,7 +43,7 @@ if __name__ == "__main__":
         from nemo.collections.asr.models import ASRModel
 
         model = ASRModel.restore_from(restore_path=args.model, map_location="cpu")
-        if hasattr(model, "tokenizer"):
+        if hasattr(model, "tokenizer") and model.tokenizer is not None:
             tokenizer = model.tokenizer
         else:
             logging.warning("Supplied model does not contain a tokenizer")
@@ -55,6 +63,7 @@ if __name__ == "__main__":
                 if args.lower:
                     word = word.lower()
 
+                # Skip special tokens
                 if word in ["<UNK>", "<unk>", "<s>", "</s>"]:
                     continue
 
@@ -62,11 +71,28 @@ if __name__ == "__main__":
                     # Default: split letters
                     f.write(f"{word}\t{' '.join(word)}\n")
                 else:
-                    try:
-                        tokens = tokenizer.text_to_tokens(word)
-                        f.write(f"{word}\t{' '.join(tokens)}\n")
-                    except Exception as e:
-                        # Strict: fail if tokenizer cannot handle a word
-                        raise RuntimeError(f"Tokenizer failed for word '{word}': {e}")
+                    # Multilingual tokenizer requires lang_id
+                    if "MultilingualTokenizer" in str(type(tokenizer)):
+                        if args.lang_id is None:
+                            raise RuntimeError(
+                                "You must provide --lang_id when using a MultilingualTokenizer"
+                            )
+                        try:
+                            tokens = tokenizer.text_to_tokens(
+                                word, lang_id=args.lang_id
+                            )
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"MultilingualTokenizer failed for word '{word}' with lang_id '{args.lang_id}': {e}"
+                            )
+                    else:
+                        try:
+                            tokens = tokenizer.text_to_tokens(word)
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"Tokenizer failed for word '{word}': {e}"
+                            )
+
+                    f.write(f"{word}\t{' '.join(tokens)}\n")
 
     logging.info("Lexicon generation complete.")
