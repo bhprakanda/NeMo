@@ -22,7 +22,10 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from nemo.collections.asr.parts.submodules import ctc_beam_decoding, ctc_greedy_decoding
-from nemo.collections.asr.parts.utils.asr_confidence_utils import ConfidenceConfig, ConfidenceMixin
+from nemo.collections.asr.parts.utils.asr_confidence_utils import (
+    ConfidenceConfig,
+    ConfidenceMixin,
+)
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses
 from nemo.collections.common.tokenizers.aggregate_tokenizer import DummyTokenizer
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
@@ -31,7 +34,9 @@ from nemo.utils import logging, logging_mode
 
 def move_dimension_to_the_front(tensor, dim_index):
     all_dims = list(range(tensor.ndim))
-    return tensor.permute(*([dim_index] + all_dims[:dim_index] + all_dims[dim_index + 1 :]))
+    return tensor.permute(
+        *([dim_index] + all_dims[:dim_index] + all_dims[dim_index + 1 :])
+    )
 
 
 class AbstractCTCDecoding(ConfidenceMixin):
@@ -184,7 +189,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
             The id of the RNNT blank token.
     """
 
-    def __init__(self, decoding_cfg, blank_id: int):
+    def __init__(self, decoding_cfg, blank_id: int, lang_id: str = None):
         super().__init__()
 
         # Convert dataclas to config
@@ -197,53 +202,62 @@ class AbstractCTCDecoding(ConfidenceMixin):
         OmegaConf.set_struct(decoding_cfg, False)
 
         # update minimal config
-        minimal_cfg = ['greedy']
+        minimal_cfg = ["greedy"]
         for item in minimal_cfg:
             if item not in decoding_cfg:
                 decoding_cfg[item] = OmegaConf.create({})
 
         self.cfg = decoding_cfg
         self.blank_id = blank_id
-        self.preserve_alignments = self.cfg.get('preserve_alignments', None)
-        self.compute_timestamps = self.cfg.get('compute_timestamps', None)
-        self.batch_dim_index = self.cfg.get('batch_dim_index', 0)
-        self.word_seperator = self.cfg.get('word_seperator', ' ')
+        self.preserve_alignments = self.cfg.get("preserve_alignments", None)
+        self.compute_timestamps = self.cfg.get("compute_timestamps", None)
+        self.batch_dim_index = self.cfg.get("batch_dim_index", 0)
+        self.word_seperator = self.cfg.get("word_seperator", " ")
 
-        possible_strategies = ['greedy', 'beam', 'pyctcdecode', 'flashlight']
+        possible_strategies = ["greedy", "beam", "pyctcdecode", "flashlight"]
         if self.cfg.strategy not in possible_strategies:
-            raise ValueError(f"Decoding strategy must be one of {possible_strategies}. Given {self.cfg.strategy}")
+            raise ValueError(
+                f"Decoding strategy must be one of {possible_strategies}. Given {self.cfg.strategy}"
+            )
 
         # Update preserve alignments
         if self.preserve_alignments is None:
-            if self.cfg.strategy in ['greedy']:
-                self.preserve_alignments = self.cfg.greedy.get('preserve_alignments', False)
+            if self.cfg.strategy in ["greedy"]:
+                self.preserve_alignments = self.cfg.greedy.get(
+                    "preserve_alignments", False
+                )
             else:
-                self.preserve_alignments = self.cfg.beam.get('preserve_alignments', False)
+                self.preserve_alignments = self.cfg.beam.get(
+                    "preserve_alignments", False
+                )
 
         # Update compute timestamps
         if self.compute_timestamps is None:
-            if self.cfg.strategy in ['greedy']:
-                self.compute_timestamps = self.cfg.greedy.get('compute_timestamps', False)
-            elif self.cfg.strategy in ['beam']:
-                self.compute_timestamps = self.cfg.beam.get('compute_timestamps', False)
+            if self.cfg.strategy in ["greedy"]:
+                self.compute_timestamps = self.cfg.greedy.get(
+                    "compute_timestamps", False
+                )
+            elif self.cfg.strategy in ["beam"]:
+                self.compute_timestamps = self.cfg.beam.get("compute_timestamps", False)
 
         # initialize confidence-related fields
-        self._init_confidence(self.cfg.get('confidence_cfg', None))
+        self._init_confidence(self.cfg.get("confidence_cfg", None))
 
         # Confidence estimation is not implemented for strategies other than `greedy`
         if (
             not self.preserve_frame_confidence
-            and self.cfg.strategy != 'greedy'
-            and self.cfg.beam.get('preserve_frame_confidence', False)
+            and self.cfg.strategy != "greedy"
+            and self.cfg.beam.get("preserve_frame_confidence", False)
         ):
-            raise NotImplementedError(f"Confidence calculation is not supported for strategy `{self.cfg.strategy}`")
+            raise NotImplementedError(
+                f"Confidence calculation is not supported for strategy `{self.cfg.strategy}`"
+            )
 
         # we need timestamps to extract non-blank per-frame confidence
         if self.compute_timestamps is not None:
             self.compute_timestamps |= self.preserve_frame_confidence
 
-        if self.cfg.strategy == 'greedy':
-
+        if self.cfg.strategy == "greedy":
             self.decoding = ctc_greedy_decoding.GreedyCTCInfer(
                 blank_id=self.blank_id,
                 preserve_alignments=self.preserve_alignments,
@@ -252,52 +266,56 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 confidence_method_cfg=self.confidence_method_cfg,
             )
 
-        elif self.cfg.strategy == 'beam':
-
+        elif self.cfg.strategy == "beam":
             self.decoding = ctc_beam_decoding.BeamCTCInfer(
                 blank_id=blank_id,
-                beam_size=self.cfg.beam.get('beam_size', 1),
-                search_type='default',
-                return_best_hypothesis=self.cfg.beam.get('return_best_hypothesis', True),
+                beam_size=self.cfg.beam.get("beam_size", 1),
+                search_type="default",
+                return_best_hypothesis=self.cfg.beam.get(
+                    "return_best_hypothesis", True
+                ),
                 preserve_alignments=self.preserve_alignments,
                 compute_timestamps=self.compute_timestamps,
-                beam_alpha=self.cfg.beam.get('beam_alpha', 1.0),
-                beam_beta=self.cfg.beam.get('beam_beta', 0.0),
-                kenlm_path=self.cfg.beam.get('kenlm_path', None),
+                beam_alpha=self.cfg.beam.get("beam_alpha", 1.0),
+                beam_beta=self.cfg.beam.get("beam_beta", 0.0),
+                kenlm_path=self.cfg.beam.get("kenlm_path", None),
             )
 
             self.decoding.override_fold_consecutive_value = False
 
-        elif self.cfg.strategy == 'pyctcdecode':
-
+        elif self.cfg.strategy == "pyctcdecode":
             self.decoding = ctc_beam_decoding.BeamCTCInfer(
                 blank_id=blank_id,
-                beam_size=self.cfg.beam.get('beam_size', 1),
-                search_type='pyctcdecode',
-                return_best_hypothesis=self.cfg.beam.get('return_best_hypothesis', True),
+                beam_size=self.cfg.beam.get("beam_size", 1),
+                search_type="pyctcdecode",
+                return_best_hypothesis=self.cfg.beam.get(
+                    "return_best_hypothesis", True
+                ),
                 preserve_alignments=self.preserve_alignments,
                 compute_timestamps=self.compute_timestamps,
-                beam_alpha=self.cfg.beam.get('beam_alpha', 1.0),
-                beam_beta=self.cfg.beam.get('beam_beta', 0.0),
-                kenlm_path=self.cfg.beam.get('kenlm_path', None),
-                pyctcdecode_cfg=self.cfg.beam.get('pyctcdecode_cfg', None),
+                beam_alpha=self.cfg.beam.get("beam_alpha", 1.0),
+                beam_beta=self.cfg.beam.get("beam_beta", 0.0),
+                kenlm_path=self.cfg.beam.get("kenlm_path", None),
+                pyctcdecode_cfg=self.cfg.beam.get("pyctcdecode_cfg", None),
             )
 
             self.decoding.override_fold_consecutive_value = False
 
-        elif self.cfg.strategy == 'flashlight':
-
+        elif self.cfg.strategy == "flashlight":
             self.decoding = ctc_beam_decoding.BeamCTCInfer(
                 blank_id=blank_id,
-                beam_size=self.cfg.beam.get('beam_size', 1),
-                search_type='flashlight',
-                return_best_hypothesis=self.cfg.beam.get('return_best_hypothesis', True),
+                beam_size=self.cfg.beam.get("beam_size", 1),
+                search_type="flashlight",
+                return_best_hypothesis=self.cfg.beam.get(
+                    "return_best_hypothesis", True
+                ),
                 preserve_alignments=self.preserve_alignments,
                 compute_timestamps=self.compute_timestamps,
-                beam_alpha=self.cfg.beam.get('beam_alpha', 1.0),
-                beam_beta=self.cfg.beam.get('beam_beta', 0.0),
-                kenlm_path=self.cfg.beam.get('kenlm_path', None),
-                flashlight_cfg=self.cfg.beam.get('flashlight_cfg', None),
+                beam_alpha=self.cfg.beam.get("beam_alpha", 1.0),
+                beam_beta=self.cfg.beam.get("beam_beta", 0.0),
+                kenlm_path=self.cfg.beam.get("kenlm_path", None),
+                flashlight_cfg=self.cfg.beam.get("flashlight_cfg", None),
+                lang_id=lang_id,
             )
 
             self.decoding.override_fold_consecutive_value = False
@@ -314,8 +332,12 @@ class AbstractCTCDecoding(ConfidenceMixin):
         decoder_lengths: torch.Tensor = None,
         fold_consecutive: bool = True,
         return_hypotheses: bool = False,
-        lang_ids = None #CTEMO
-    ) -> Tuple[List[str], Optional[List[List[str]]], Optional[Union[Hypothesis, NBestHypotheses]]]:
+        lang_ids=None,  # CTEMO
+    ) -> Tuple[
+        List[str],
+        Optional[List[List[str]]],
+        Optional[Union[Hypothesis, NBestHypotheses]],
+    ]:
         """
         Decodes a sequence of labels to words
 
@@ -339,10 +361,12 @@ class AbstractCTCDecoding(ConfidenceMixin):
         """
 
         if isinstance(decoder_outputs, torch.Tensor):
-            decoder_outputs = move_dimension_to_the_front(decoder_outputs, self.batch_dim_index)
+            decoder_outputs = move_dimension_to_the_front(
+                decoder_outputs, self.batch_dim_index
+            )
 
         if (
-            hasattr(self.decoding, 'override_fold_consecutive_value')
+            hasattr(self.decoding, "override_fold_consecutive_value")
             and self.decoding.override_fold_consecutive_value is not None
         ):
             logging.info(
@@ -367,16 +391,20 @@ class AbstractCTCDecoding(ConfidenceMixin):
             all_hypotheses = []
 
             for nbest_hyp in hypotheses_list:  # type: NBestHypotheses
-                n_hyps = nbest_hyp.n_best_hypotheses  # Extract all hypotheses for this sample
+                n_hyps = (
+                    nbest_hyp.n_best_hypotheses
+                )  # Extract all hypotheses for this sample
                 decoded_hyps = self.decode_hypothesis(
                     n_hyps, fold_consecutive, lang_ids
                 )  # type: List[Union[Hypothesis, NBestHypotheses]]
 
                 # If computing timestamps
                 if self.compute_timestamps is True:
-                    timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
+                    timestamp_type = self.cfg.get("ctc_timestamp_type", "all")
                     for hyp_idx in range(len(decoded_hyps)):
-                        decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(decoded_hyps[hyp_idx], timestamp_type)
+                        decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(
+                            decoded_hyps[hyp_idx], timestamp_type
+                        )
 
                 hypotheses.append(decoded_hyps[0])  # best hypothesis
                 all_hypotheses.append(decoded_hyps)
@@ -396,15 +424,19 @@ class AbstractCTCDecoding(ConfidenceMixin):
             # If computing timestamps
             if self.compute_timestamps is True:
                 # greedy decoding, can get high-level confidence scores
-                if return_hypotheses and (self.preserve_word_confidence or self.preserve_token_confidence):
+                if return_hypotheses and (
+                    self.preserve_word_confidence or self.preserve_token_confidence
+                ):
                     hypotheses = self.compute_confidence(hypotheses)
                 else:
                     # remove unused token_repetitions from Hypothesis.text
                     for hyp in hypotheses:
                         hyp.text = hyp.text[:2]
-                timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
+                timestamp_type = self.cfg.get("ctc_timestamp_type", "all")
                 for hyp_idx in range(len(hypotheses)):
-                    hypotheses[hyp_idx] = self.compute_ctc_timestamps(hypotheses[hyp_idx], timestamp_type)
+                    hypotheses[hyp_idx] = self.compute_ctc_timestamps(
+                        hypotheses[hyp_idx], timestamp_type
+                    )
 
             if return_hypotheses:
                 return hypotheses, None
@@ -413,7 +445,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
             return best_hyp_text, None
 
     def decode_hypothesis(
-        self, hypotheses_list: List[Hypothesis], fold_consecutive: bool, lang_ids = None
+        self, hypotheses_list: List[Hypothesis], fold_consecutive: bool, lang_ids=None
     ) -> List[Union[Hypothesis, NBestHypotheses]]:
         """
         Decode a list of hypotheses into a list of strings.
@@ -448,7 +480,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 last_repetition = 1
 
                 for pidx, p in enumerate(prediction):
-                    if (p != previous or previous == self.blank_id) and p != self.blank_id:
+                    if (
+                        p != previous or previous == self.blank_id
+                    ) and p != self.blank_id:
                         decoded_prediction.append(p)
 
                         token_lengths.append(pidx - last_length)
@@ -468,8 +502,12 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 if predictions_len is not None:
                     prediction = prediction[:predictions_len]
                 decoded_prediction = prediction[prediction != self.blank_id].tolist()
-                token_lengths = [1] * len(decoded_prediction)  # preserve number of repetitions per token
-                token_repetitions = [1] * len(decoded_prediction)  # preserve number of repetitions per token
+                token_lengths = [1] * len(
+                    decoded_prediction
+                )  # preserve number of repetitions per token
+                token_repetitions = [1] * len(
+                    decoded_prediction
+                )  # preserve number of repetitions per token
 
             # De-tokenize the integer tokens; if not computing timestamps
             if self.compute_timestamps is True:
@@ -479,13 +517,15 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 hypothesis = (decoded_prediction, token_lengths, token_repetitions)
             else:
                 if lang_ids is not None:
-                    hypothesis = self.decode_tokens_to_str(decoded_prediction, lang_ids[ind])
+                    hypothesis = self.decode_tokens_to_str(
+                        decoded_prediction, lang_ids[ind]
+                    )
                 else:
                     hypothesis = self.decode_tokens_to_str(decoded_prediction)
 
                 # TODO: remove
                 # collapse leading spaces before . , ? for PC models
-                hypothesis = re.sub(r'(\s+)([\.\,\?])', r'\2', hypothesis)
+                hypothesis = re.sub(r"(\s+)([\.\,\?])", r"\2", hypothesis)
 
             # Preserve this wrapped hypothesis or decoded text tokens.
             hypotheses_list[ind].text = hypothesis
@@ -520,7 +560,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 for tr in token_repetitions:
                     # token repetition can be zero
                     j = i + tr
-                    token_confidence.append(self._aggregate_confidence(non_blank_frame_confidence[i:j]))
+                    token_confidence.append(
+                        self._aggregate_confidence(non_blank_frame_confidence[i:j])
+                    )
                     i = j
             else:
                 # <blank> tokens are considered to belong to the last non-blank token, if any.
@@ -528,7 +570,11 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 if len(token_lengths) > 0:
                     ts = token_lengths[0]
                     for tl in token_lengths[1:] + [len(hyp.frame_confidence)]:
-                        token_confidence.append(self._aggregate_confidence(hyp.frame_confidence[ts : ts + tl]))
+                        token_confidence.append(
+                            self._aggregate_confidence(
+                                hyp.frame_confidence[ts : ts + tl]
+                            )
+                        )
                         ts += tl
             hyp.token_confidence = token_confidence
         if self.preserve_word_confidence:
@@ -563,7 +609,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
         """
         raise NotImplementedError()
 
-    def compute_ctc_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all"):
+    def compute_ctc_timestamps(
+        self, hypothesis: Hypothesis, timestamp_type: str = "all"
+    ):
         """
         Method to compute time stamps at char/subword, and word level given some hypothesis.
         Requires the input hypothesis to contain a `text` field that is the tuple. The tuple contains -
@@ -581,7 +629,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
             A Hypothesis object with a modified `timestep` value, which is now a dictionary containing
             the time stamp information.
         """
-        assert timestamp_type in ['char', 'word', 'all']
+        assert timestamp_type in ["char", "word", "all"]
 
         # Unpack the temporary storage, and set the decoded predictions
         decoded_prediction, token_lengths = hypothesis.text
@@ -607,15 +655,17 @@ class AbstractCTCDecoding(ConfidenceMixin):
         # detect char vs subword models
         lens = [len(list(v["char"])) > 1 for v in char_offsets]
         if any(lens):
-            text_type = 'subword'
+            text_type = "subword"
         else:
-            text_type = 'char'
+            text_type = "char"
 
         # retrieve word offsets from character offsets
         word_offsets = None
-        if timestamp_type in ['word', 'all']:
-            if text_type == 'char':
-                word_offsets = self._get_word_offsets_chars(char_offsets, word_delimiter_char=self.word_seperator)
+        if timestamp_type in ["word", "all"]:
+            if text_type == "char":
+                word_offsets = self._get_word_offsets_chars(
+                    char_offsets, word_delimiter_char=self.word_seperator
+                )
             else:
                 word_offsets = self._get_word_offsets_subwords_sentencepiece(
                     char_offsets,
@@ -634,12 +684,12 @@ class AbstractCTCDecoding(ConfidenceMixin):
         hypothesis.timestep = {"timestep": timestep_info}
 
         # Add char / subword time stamps
-        if char_offsets is not None and timestamp_type in ['char', 'all']:
-            hypothesis.timestep['char'] = char_offsets
+        if char_offsets is not None and timestamp_type in ["char", "all"]:
+            hypothesis.timestep["char"] = char_offsets
 
         # Add word time stamps
-        if word_offsets is not None and timestamp_type in ['word', 'all']:
-            hypothesis.timestep['word'] = word_offsets
+        if word_offsets is not None and timestamp_type in ["word", "all"]:
+            hypothesis.timestep["word"] = word_offsets
 
         # Convert the token indices to text
         hypothesis.text = self.decode_tokens_to_str(hypothesis.text)
@@ -719,7 +769,13 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 # Switching state
                 if state == "SPACE":
                     # Finishing a word
-                    word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
+                    word_offsets.append(
+                        {
+                            "word": word,
+                            "start_offset": start_offset,
+                            "end_offset": end_offset,
+                        }
+                    )
                 else:
                     # Starting a new word
                     start_offset = offset["start_offset"]
@@ -728,7 +784,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
             last_state = state
         if last_state == "WORD":
-            word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
+            word_offsets.append(
+                {"word": word, "start_offset": start_offset, "end_offset": end_offset}
+            )
 
         return word_offsets
 
@@ -773,7 +831,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
                     word_offsets.append(
                         {
                             "word": decode_tokens_to_str(built_token),
-                            "start_offset": offsets[previous_token_index]["start_offset"],
+                            "start_offset": offsets[previous_token_index][
+                                "start_offset"
+                            ],
                             "end_offset": offsets[i]["start_offset"],
                         }
                     )
@@ -828,7 +888,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
     def preserve_alignments(self, value):
         self._preserve_alignments = value
 
-        if hasattr(self, 'decoding'):
+        if hasattr(self, "decoding"):
             self.decoding.preserve_alignments = value
 
     @property
@@ -839,7 +899,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
     def compute_timestamps(self, value):
         self._compute_timestamps = value
 
-        if hasattr(self, 'decoding'):
+        if hasattr(self, "decoding"):
             self.decoding.compute_timestamps = value
 
     @property
@@ -850,7 +910,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
     def preserve_frame_confidence(self, value):
         self._preserve_frame_confidence = value
 
-        if hasattr(self, 'decoding'):
+        if hasattr(self, "decoding"):
             self.decoding.preserve_frame_confidence = value
 
 
@@ -1005,7 +1065,9 @@ class CTCDecoding(AbstractCTCDecoding):
     """
 
     def __init__(
-        self, decoding_cfg, vocabulary,
+        self,
+        decoding_cfg,
+        vocabulary,
     ):
         blank_id = len(vocabulary)
         self.vocabulary = vocabulary
@@ -1016,7 +1078,7 @@ class CTCDecoding(AbstractCTCDecoding):
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):
             self.decoding.set_vocabulary(self.vocabulary)
-            self.decoding.set_decoding_type('char')
+            self.decoding.set_decoding_type("char")
 
     def _aggregate_token_confidence(self, hypothesis: Hypothesis) -> List[float]:
         """
@@ -1029,7 +1091,8 @@ class CTCDecoding(AbstractCTCDecoding):
             A list of word-level confidence scores.
         """
         return self._aggregate_token_confidence_chars(
-            self.decode_tokens_to_str(hypothesis.text[0]).split(), hypothesis.token_confidence
+            self.decode_tokens_to_str(hypothesis.text[0]).split(),
+            hypothesis.token_confidence,
         )
 
     def decode_tokens_to_str(self, tokens: List[int]) -> str:
@@ -1042,7 +1105,7 @@ class CTCDecoding(AbstractCTCDecoding):
         Returns:
             A decoded string.
         """
-        hypothesis = ''.join(self.decode_ids_to_tokens(tokens))
+        hypothesis = "".join(self.decode_ids_to_tokens(tokens))
         return hypothesis
 
     def decode_ids_to_tokens(self, tokens: List[int]) -> List[str]:
@@ -1211,18 +1274,22 @@ class CTCBPEDecoding(AbstractCTCDecoding):
         tokenizer: NeMo tokenizer object, which inherits from TokenizerSpec.
     """
 
-    def __init__(self, decoding_cfg, tokenizer: TokenizerSpec, blank_id = None, lang_id: str = None): #CTEMO
+    def __init__(
+        self, decoding_cfg, tokenizer: TokenizerSpec, blank_id=None, lang_id: str = None
+    ):  # CTEMO
         if blank_id is None:
             blank_id = tokenizer.tokenizer.vocab_size
         self.tokenizer = tokenizer
 
-        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id)
+        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id, lang_id=lang_id)
 
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):
-            if hasattr(self.tokenizer.tokenizer, 'get_vocab'):
+            if hasattr(self.tokenizer.tokenizer, "get_vocab"):
                 vocab_dict = self.tokenizer.tokenizer.get_vocab()
-                if isinstance(self.tokenizer.tokenizer, DummyTokenizer):  # AggregateTokenizer.DummyTokenizer
+                if isinstance(
+                    self.tokenizer.tokenizer, DummyTokenizer
+                ):  # AggregateTokenizer.DummyTokenizer
                     if lang_id is not None:
                         tokenizer = self.tokenizer.tokenizers_dict[lang_id]
                         vocab_dict = tokenizer.tokenizer.get_vocab()
@@ -1236,7 +1303,7 @@ class CTCBPEDecoding(AbstractCTCDecoding):
             else:
                 logging.warning("Could not resolve the vocabulary of the tokenizer !")
 
-            self.decoding.set_decoding_type('subword')
+            self.decoding.set_decoding_type("subword")
 
     def _aggregate_token_confidence(self, hypothesis: Hypothesis) -> List[float]:
         """
@@ -1251,10 +1318,12 @@ class CTCBPEDecoding(AbstractCTCDecoding):
             A list of word-level confidence scores.
         """
         return self._aggregate_token_confidence_subwords_sentencepiece(
-            self.decode_tokens_to_str(hypothesis.text[0]).split(), hypothesis.token_confidence, hypothesis.text[0]
+            self.decode_tokens_to_str(hypothesis.text[0]).split(),
+            hypothesis.token_confidence,
+            hypothesis.text[0],
         )
 
-    def decode_tokens_to_str(self, tokens: List[int], lang: str = None) -> str: #CTEMO
+    def decode_tokens_to_str(self, tokens: List[int], lang: str = None) -> str:  # CTEMO
         """
         Implemented by subclass in order to decoder a token list into a string.
 
@@ -1264,7 +1333,7 @@ class CTCBPEDecoding(AbstractCTCDecoding):
         Returns:
             A decoded string.
         """
-        if lang is not None: #CTEMO
+        if lang is not None:  # CTEMO
             hypothesis = self.tokenizer.ids_to_text(tokens, lang)
         else:
             hypothesis = self.tokenizer.ids_to_text(tokens)

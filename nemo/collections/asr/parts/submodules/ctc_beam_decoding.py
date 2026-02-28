@@ -29,12 +29,12 @@ DEFAULT_TOKEN_OFFSET = 100
 
 
 def pack_hypotheses(
-    hypotheses: List[rnnt_utils.NBestHypotheses], logitlen: torch.Tensor,
+    hypotheses: List[rnnt_utils.NBestHypotheses],
+    logitlen: torch.Tensor,
 ) -> List[rnnt_utils.NBestHypotheses]:
-
     if logitlen is not None:
-        if hasattr(logitlen, 'cpu'):
-            logitlen_cpu = logitlen.to('cpu')
+        if hasattr(logitlen, "cpu"):
+            logitlen_cpu = logitlen.to("cpu")
         else:
             logitlen_cpu = logitlen
 
@@ -51,7 +51,7 @@ def pack_hypotheses(
     return hypotheses
 
 
-def _states_to_device(dec_state, device='cpu'):
+def _states_to_device(dec_state, device="cpu"):
     if torch.is_tensor(dec_state):
         dec_state = dec_state.to(device)
 
@@ -74,17 +74,15 @@ class AbstractBeamCTCInfer(Typing):
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports.
-        """
+        """Returns definitions of module input ports."""
         return {
-            "decoder_output": NeuralType(('B', 'T', 'D'), LogprobsType()),
-            "decoder_lengths": NeuralType(tuple('B'), LengthsType()),
+            "decoder_output": NeuralType(("B", "T", "D"), LogprobsType()),
+            "decoder_lengths": NeuralType(tuple("B"), LengthsType()),
         }
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports.
-        """
+        """Returns definitions of module output ports."""
         return {"predictions": [NeuralType(elements_type=HypothesisType())]}
 
     def __init__(self, blank_id: int, beam_size: int):
@@ -127,11 +125,12 @@ class AbstractBeamCTCInfer(Typing):
             decoding_type: Str corresponding to decoding type. Only supports "char" and "subword".
         """
         decoding_type = decoding_type.lower()
-        supported_types = ['char', 'subword']
+        supported_types = ["char", "subword"]
 
         if decoding_type not in supported_types:
             raise ValueError(
-                f"Unsupported decoding type. Supported types = {supported_types}.\n" f"Given = {decoding_type}"
+                f"Unsupported decoding type. Supported types = {supported_types}.\n"
+                f"Given = {decoding_type}"
             )
 
         self.decoding_type = decoding_type
@@ -147,7 +146,9 @@ class AbstractBeamCTCInfer(Typing):
 
     @typecheck()
     def forward(
-        self, decoder_output: torch.Tensor, decoder_lengths: torch.Tensor,
+        self,
+        decoder_output: torch.Tensor,
+        decoder_lengths: torch.Tensor,
     ) -> Tuple[List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]]:
         """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
         Output token is generated auto-repressively.
@@ -193,8 +194,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         beam_alpha: float = 1.0,
         beam_beta: float = 0.0,
         kenlm_path: str = None,
-        flashlight_cfg: Optional['FlashlightConfig'] = None,
-        pyctcdecode_cfg: Optional['PyCTCDecodeConfig'] = None,
+        flashlight_cfg: Optional["FlashlightConfig"] = None,
+        pyctcdecode_cfg: Optional["PyCTCDecodeConfig"] = None,
+        lang_id: str = None,
     ):
         super().__init__(blank_id=blank_id, beam_size=beam_size)
 
@@ -202,9 +204,12 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         self.return_best_hypothesis = return_best_hypothesis
         self.preserve_alignments = preserve_alignments
         self.compute_timestamps = compute_timestamps
+        self.lang_id = lang_id
 
         if self.compute_timestamps:
-            raise ValueError(f"Currently this flag is not supported for beam search algorithms.")
+            raise ValueError(
+                "Currently this flag is not supported for beam search algorithms."
+            )
 
         self.vocab = None  # This must be set by specific method by user before calling forward() !
 
@@ -246,7 +251,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
     @typecheck()
     def forward(
-        self, decoder_output: torch.Tensor, decoder_lengths: torch.Tensor,
+        self,
+        decoder_output: torch.Tensor,
+        decoder_lengths: torch.Tensor,
     ) -> Tuple[List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]]:
         """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
         Output token is generated auto-repressively.
@@ -260,10 +267,14 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             packed list containing batch number of sentences (Hypotheses).
         """
         if self.vocab is None:
-            raise RuntimeError("Please set the vocabulary with `set_vocabulary()` before calling this function.")
+            raise RuntimeError(
+                "Please set the vocabulary with `set_vocabulary()` before calling this function."
+            )
 
         if self.decoding_type is None:
-            raise ValueError("Please set the decoding type with `set_decoding_type()` before calling this function.")
+            raise ValueError(
+                "Please set the decoding type with `set_decoding_type()` before calling this function."
+            )
 
         with torch.no_grad(), torch.inference_mode():
             # Process each sequence independently
@@ -283,7 +294,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             packed_result = pack_hypotheses(hypotheses, decoder_lengths)
 
             # Pack the result
-            if self.return_best_hypothesis and isinstance(packed_result[0], rnnt_utils.NBestHypotheses):
+            if self.return_best_hypothesis and isinstance(
+                packed_result[0], rnnt_utils.NBestHypotheses
+            ):
                 packed_result = [res.n_best_hypotheses[0] for res in packed_result]  # type: Hypothesis
 
         return (packed_result,)
@@ -317,14 +330,16 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 )
 
             # perform token offset for subword models
-            if self.decoding_type == 'subword':
+            if self.decoding_type == "subword":
                 vocab = [chr(idx + self.token_offset) for idx in range(len(self.vocab))]
             else:
                 # char models
                 vocab = self.vocab
 
             # Must import at runtime to avoid circular dependency due to module level import.
-            from nemo.collections.asr.modules.beam_search_decoder import BeamSearchDecoderWithLM
+            from nemo.collections.asr.modules.beam_search_decoder import (
+                BeamSearchDecoderWithLM,
+            )
 
             self.default_beam_scorer = BeamSearchDecoderWithLM(
                 vocab=vocab,
@@ -336,11 +351,16 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 input_tensor=False,
             )
 
-        x = x.to('cpu')
+        x = x.to("cpu")
 
         with typecheck.disable_checks():
-            data = [x[sample_id, : out_len[sample_id], :].softmax(dim=-1) for sample_id in range(len(x))]
-            beams_batch = self.default_beam_scorer.forward(log_probs=data, log_probs_length=None)
+            data = [
+                x[sample_id, : out_len[sample_id], :].softmax(dim=-1)
+                for sample_id in range(len(x))
+            ]
+            beams_batch = self.default_beam_scorer.forward(
+                log_probs=data, log_probs_length=None
+            )
 
         # For each sample in the batch
         nbest_hypotheses = []
@@ -349,7 +369,11 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             hypotheses = []
             for candidate_idx, candidate in enumerate(beams):
                 hypothesis = rnnt_utils.Hypothesis(
-                    score=0.0, y_sequence=[], dec_state=None, timestep=[], last_token=None
+                    score=0.0,
+                    y_sequence=[],
+                    dec_state=None,
+                    timestep=[],
+                    last_token=None,
                 )
 
                 # For subword encoding, NeMo will double encode the subword (multiple tokens) into a
@@ -357,7 +381,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 # compress the size of the final KenLM ARPA / Binary file.
                 # In order to do double encoding, we shift the subword by some token offset.
                 # This step is ignored for character based models.
-                if self.decoding_type == 'subword':
+                if self.decoding_type == "subword":
                     pred_token_ids = [ord(c) - self.token_offset for c in candidate[1]]
                 else:
                     # Char models
@@ -406,16 +430,19 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             import pyctcdecode
         except (ImportError, ModuleNotFoundError):
             raise ImportError(
-                f"Could not load `pyctcdecode` library. Please install it from pip using :\n"
-                f"pip install --upgrade pyctcdecode"
+                "Could not load `pyctcdecode` library. Please install it from pip using :\n"
+                "pip install --upgrade pyctcdecode"
             )
 
         if self.pyctcdecode_beam_scorer is None:
             self.pyctcdecode_beam_scorer = pyctcdecode.build_ctcdecoder(
-                labels=self.vocab, kenlm_model_path=self.kenlm_path, alpha=self.beam_alpha, beta=self.beam_beta
+                labels=self.vocab,
+                kenlm_model_path=self.kenlm_path,
+                alpha=self.beam_alpha,
+                beta=self.beam_beta,
             )  # type: pyctcdecode.BeamSearchDecoderCTC
 
-        x = x.to('cpu').numpy()
+        x = x.to("cpu").numpy()
 
         with typecheck.disable_checks():
             beams_batch = []
@@ -439,18 +466,26 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             for candidate_idx, candidate in enumerate(beams):
                 # Candidate = (text, last_lm_state, text_frames, logit_score, lm_score)
                 hypothesis = rnnt_utils.Hypothesis(
-                    score=0.0, y_sequence=[], dec_state=None, timestep=[], last_token=None
+                    score=0.0,
+                    y_sequence=[],
+                    dec_state=None,
+                    timestep=[],
+                    last_token=None,
                 )
 
                 # TODO: Requires token ids to be returned rather than text.
-                if self.decoding_type == 'subword':
+                if self.decoding_type == "subword":
                     if self.tokenizer is None:
-                        raise ValueError("Tokenizer must be provided for subword decoding. Use set_tokenizer().")
+                        raise ValueError(
+                            "Tokenizer must be provided for subword decoding. Use set_tokenizer()."
+                        )
 
                     pred_token_ids = self.tokenizer.text_to_ids(candidate[0])
                 else:
                     if self.vocab is None:
-                        raise ValueError("Vocab must be provided for character decoding. Use set_vocab().")
+                        raise ValueError(
+                            "Vocab must be provided for character decoding. Use set_vocab()."
+                        )
 
                     chars = list(candidate[0])
                     pred_token_ids = [self.vocab_index_map[c] for c in chars]
@@ -463,7 +498,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 hypothesis.timestep = candidate[2]  # text_frames
 
                 if self.preserve_alignments:
-                    hypothesis.alignments = torch.from_numpy(x[beams_idx][: out_len[beams_idx]])
+                    hypothesis.alignments = torch.from_numpy(
+                        x[beams_idx][: out_len[beams_idx]]
+                    )
 
                 hypotheses.append(hypothesis)
 
@@ -508,11 +545,14 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             #    vocab = self.vocab
 
             # Must import at runtime to avoid circular dependency due to module level import.
-            from nemo.collections.asr.modules.flashlight_decoder import FlashLightKenLMBeamSearchDecoder
+            from nemo.collections.asr.modules.flashlight_decoder import (
+                FlashLightKenLMBeamSearchDecoder,
+            )
 
             self.flashlight_beam_scorer = FlashLightKenLMBeamSearchDecoder(
                 lm_path=self.kenlm_path,
                 vocabulary=self.vocab,
+                lang_id=self.lang_id,
                 tokenizer=self.tokenizer,
                 lexicon_path=self.flashlight_cfg.lexicon_path,
                 boost_path=self.flashlight_cfg.boost_path,
@@ -525,7 +565,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 sil_weight=self.flashlight_cfg.sil_weight,
             )
 
-        x = x.to('cpu')
+        x = x.to("cpu")
 
         with typecheck.disable_checks():
             beams_batch = self.flashlight_beam_scorer.forward(log_probs=x)
@@ -537,12 +577,16 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             hypotheses = []
             for candidate_idx, candidate in enumerate(beams):
                 hypothesis = rnnt_utils.Hypothesis(
-                    score=0.0, y_sequence=[], dec_state=None, timestep=[], last_token=None
+                    score=0.0,
+                    y_sequence=[],
+                    dec_state=None,
+                    timestep=[],
+                    last_token=None,
                 )
 
                 # We preserve the token ids and the score for this hypothesis
-                hypothesis.y_sequence = candidate['tokens'].tolist()
-                hypothesis.score = candidate['score']
+                hypothesis.y_sequence = candidate["tokens"].tolist()
+                hypothesis.score = candidate["score"]
 
                 # If alignment must be preserved, we preserve a view of the output logprobs.
                 # Note this view is shared amongst all beams within the sample, be sure to clone it if you
@@ -564,7 +608,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
         # Please check train_kenlm.py in scripts/asr_language_modeling/ to find out why we need
         # TOKEN_OFFSET for BPE-based models
-        if self.decoding_type == 'subword':
+        if self.decoding_type == "subword":
             self.token_offset = DEFAULT_TOKEN_OFFSET
 
 
@@ -593,7 +637,7 @@ class FlashlightConfig:
 @dataclass
 class BeamCTCInferConfig:
     beam_size: int
-    search_type: str = 'default'
+    search_type: str = "default"
     preserve_alignments: bool = False
     compute_timestamps: bool = False
     return_best_hypothesis: bool = True
@@ -602,5 +646,9 @@ class BeamCTCInferConfig:
     beam_beta: float = 0.0
     kenlm_path: Optional[str] = None
 
-    flashlight_cfg: Optional[FlashlightConfig] = field(default_factory=lambda: FlashlightConfig())
-    pyctcdecode_cfg: Optional[PyCTCDecodeConfig] = field(default_factory=lambda: PyCTCDecodeConfig())
+    flashlight_cfg: Optional[FlashlightConfig] = field(
+        default_factory=lambda: FlashlightConfig()
+    )
+    pyctcdecode_cfg: Optional[PyCTCDecodeConfig] = field(
+        default_factory=lambda: PyCTCDecodeConfig()
+    )
