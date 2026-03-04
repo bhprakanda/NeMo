@@ -8,10 +8,12 @@ fi
 KENLM_MAX_ORDER=10
 
 if [ ! -d "$NEMO_PATH" ]; then
-  echo "Error: '$NEMO_PATH' does not exist. Pass it as the first argument."
+  echo "Error: '$NEMO_PATH' does not exist."
   exit 1
 fi
 echo "==> Using NEMO_PATH=$NEMO_PATH"
+
+DECODERS_DIR="$NEMO_PATH/decoders"
 
 # ── System dependencies ───────────────────────────────────────────────────────
 echo "==> Installing system dependencies..."
@@ -25,19 +27,18 @@ export BOOST_ROOT=/usr
 echo "==> Setting up OpenSeq2Seq decoders..."
 cd "$NEMO_PATH"
 
-DECODERS_DIR="$NEMO_PATH/decoders"
-
 if [ ! -f "$DECODERS_DIR/setup.py" ]; then
+  # Clean slate — remove any partial state from previous failed runs
   rm -rf OpenSeq2Seq
+
   git clone https://github.com/NVIDIA/OpenSeq2Seq
   cd OpenSeq2Seq
   git checkout ctc-decoders
-  cd ..
+  cd "$NEMO_PATH"
 
-  # mkdir -p handles the case where decoders/ does not exist yet
-  # cp -rn handles the case where it already exists (no-clobber merge)
+  # Use rsync-style copy: works whether decoders/ exists or not
   mkdir -p "$DECODERS_DIR"
-  cp -rn OpenSeq2Seq/decoders/. "$DECODERS_DIR/"
+  cp -rf OpenSeq2Seq/decoders/. "$DECODERS_DIR/"
   rm -rf OpenSeq2Seq
 
   SETUP_SRC="$NEMO_PATH/scripts/installers/setup_os2s_decoders.py"
@@ -54,39 +55,47 @@ cd "$DECODERS_DIR"
 
 # ── OpenFST ───────────────────────────────────────────────────────────────────
 echo "==> Building OpenFST..."
-if [ ! -f "openfst-1.6.3/src/lib/.libs/libfst.so" ]; then
-  rm -rf openfst-1.6.3 openfst.tar.gz
+if [ ! -f "$DECODERS_DIR/openfst-1.6.3/src/lib/.libs/libfst.so" ]; then
+  # Remove any partial/broken openfst state
+  rm -rf "$DECODERS_DIR/openfst-1.6.3" "$DECODERS_DIR/openfst-win-1.6.3.1" "$DECODERS_DIR/openfst.tar.gz"
+
   wget -q https://github.com/kkm000/openfst/archive/refs/tags/win/1.6.3.1.tar.gz -O openfst.tar.gz
   tar -xzf openfst.tar.gz
+  # At this point only openfst-win-1.6.3.1 exists, safe to rename
   mv openfst-win-1.6.3.1 openfst-1.6.3
   rm -f openfst.tar.gz
+
   cd openfst-1.6.3
   ./configure --enable-static --enable-shared --enable-far --enable-ngram-fsts
   make -j"$(nproc)"
-  cd ..
+  cd "$DECODERS_DIR"
 else
   echo "    OpenFST already built, skipping."
 fi
 
 # ── KenLM ─────────────────────────────────────────────────────────────────────
 echo "==> Setting up KenLM..."
-if [ ! -f "kenlm/CMakeLists.txt" ]; then
-  rm -rf kenlm
-  git clone https://github.com/kpu/kenlm kenlm
+if [ ! -f "$DECODERS_DIR/kenlm/CMakeLists.txt" ]; then
+  # Remove any empty or broken kenlm directory before cloning
+  rm -rf "$DECODERS_DIR/kenlm"
+  git clone https://github.com/kpu/kenlm "$DECODERS_DIR/kenlm"
 else
   echo "    kenlm source already present, skipping clone."
 fi
 
 export KENLM_ROOT="$DECODERS_DIR/kenlm"
 
+echo "==> Building KenLM..."
 if [ ! -f "$KENLM_ROOT/build/lib/libkenlm.a" ]; then
+  # Remove partial build dir if it exists
+  rm -rf "$KENLM_ROOT/build"
   mkdir -p "$KENLM_ROOT/build"
   cd "$KENLM_ROOT/build"
-  cmake .. -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER -DCMAKE_BUILD_TYPE=Release
+  cmake "$KENLM_ROOT" -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER -DCMAKE_BUILD_TYPE=Release
   make -j"$(nproc)"
   cd "$DECODERS_DIR"
 else
-  echo "    KenLM already built, skipping cmake/make."
+  echo "    KenLM already built, skipping."
 fi
 
 echo "==> Installing KenLM Python bindings..."
@@ -102,12 +111,14 @@ fi
 echo "==> Building ctc_decoders..."
 
 if [ ! -f "$DECODERS_DIR/setup.py" ]; then
-  echo "Error: setup.py missing from $DECODERS_DIR. Cannot build ctc_decoders."
+  echo "Error: setup.py missing from $DECODERS_DIR"
   exit 1
 fi
 
-# Expose all KenLM header paths the compiler needs
-export CPLUS_INCLUDE_PATH="$KENLM_ROOT:$KENLM_ROOT/lm:${CPLUS_INCLUDE_PATH:-}"
+# The setup.py hardcodes -Ikenlm as include path, so kenlm headers must be
+# directly inside $DECODERS_DIR/kenlm/ — which they are since we cloned there.
+# Also expose them explicitly for the compiler.
+export CPLUS_INCLUDE_PATH="$KENLM_ROOT:${CPLUS_INCLUDE_PATH:-}"
 
 cd "$DECODERS_DIR"
 python setup.py build_ext --inplace
@@ -115,10 +126,10 @@ python setup.py build_ext --inplace
 # ── Flashlight Text ───────────────────────────────────────────────────────────
 echo "==> Installing flashlight-text..."
 if ! python -c "from flashlight.lib.text.decoder import CpuBeamSearchDecoder" 2>/dev/null; then
-  cd "$DECODERS_DIR"
-  rm -rf text
-  git clone https://github.com/flashlight/text
-  cd text
+  # Always remove and re-clone to avoid partial state
+  rm -rf "$DECODERS_DIR/text"
+  git clone https://github.com/flashlight/text "$DECODERS_DIR/text"
+  cd "$DECODERS_DIR/text"
   KENLM_ROOT="$KENLM_ROOT" python setup.py bdist_wheel
   pip install dist/*.whl --force-reinstall
   cd "$DECODERS_DIR"
