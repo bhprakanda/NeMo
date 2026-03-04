@@ -32,17 +32,14 @@ cd $NEMO_PATH
 
 if [ $(id -u) -eq 0 ]; then
   alias aptupdate='apt-get update'
-  alias b2install='./b2'
 else
   alias aptupdate='sudo apt-get update'
-  alias b2install='sudo ./b2'
 fi
 
-aptupdate && apt-get upgrade -y && apt-get install -y swig liblzma-dev && rm -rf /var/lib/apt/lists/* # liblzma needed for flashlight decoder
+aptupdate && apt-get upgrade -y && apt-get install -y swig liblzma-dev libboost-all-dev && rm -rf /var/lib/apt/lists/*
 
-# install Boost package for KenLM
-wget https://boostorg.jfrog.io/artifactory/main/release/1.80.0/source/boost_1_80_0.tar.bz2 --no-check-certificate && tar --bzip2 -xf $NEMO_PATH/boost_1_80_0.tar.bz2 && cd boost_1_80_0 && ./bootstrap.sh && b2install --layout=tagged link=static,shared threading=multi,single install -j4 && cd .. || echo FAILURE
-export BOOST_ROOT=$NEMO_PATH/boost_1_80_0
+# Use system Boost installed via apt (replaces broken JFrog download URL)
+export BOOST_ROOT=/usr
 
 git clone https://github.com/NVIDIA/OpenSeq2Seq
 cd OpenSeq2Seq
@@ -52,7 +49,17 @@ mv OpenSeq2Seq/decoders $NEMO_PATH/
 rm -rf OpenSeq2Seq
 cd $NEMO_PATH/decoders
 cp $NEMO_PATH/scripts/installers/setup_os2s_decoders.py ./setup.py
-./setup.sh
+
+# Download OpenFST from GitHub mirror (replaces dead openfst.org URL)
+wget https://github.com/kkm000/openfst/archive/refs/tags/win/1.6.3.1.tar.gz -O openfst.tar.gz
+tar -xzf openfst.tar.gz
+mv openfst-win-1.6.3.1 openfst-1.6.3
+cd openfst-1.6.3
+./configure --enable-static --enable-shared --enable-far --enable-ngram-fsts
+make -j4
+cd ..
+
+python setup.py build_ext --inplace
 
 # install KenLM
 cd $NEMO_PATH/decoders/kenlm/build && cmake -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER .. && make -j2
