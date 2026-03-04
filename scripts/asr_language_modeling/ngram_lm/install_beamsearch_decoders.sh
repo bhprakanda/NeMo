@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 set -euo pipefail
 
 NEMO_PATH=/workspace/nemo
@@ -21,63 +7,59 @@ if [ "$#" -eq 1 ]; then
 fi
 KENLM_MAX_ORDER=10
 
-if [ -d "$NEMO_PATH" ]; then
-  echo "The folder '$NEMO_PATH' exists."
-else
-  echo "Error: The folder '$NEMO_PATH' does not exist. Specify it as a first command line positional argument!"
+if [ ! -d "$NEMO_PATH" ]; then
+  echo "Error: '$NEMO_PATH' does not exist. Pass it as the first argument."
   exit 1
 fi
+echo "==> Using NEMO_PATH=$NEMO_PATH"
 
-# ── System dependencies ──────────────────────────────────────────────────────
+# ── System dependencies ───────────────────────────────────────────────────────
 echo "==> Installing system dependencies..."
-if [ "$(id -u)" -eq 0 ]; then
-  apt-get update -qq
-  apt-get upgrade -y -qq
-  apt-get install -y -qq swig liblzma-dev libboost-all-dev cmake git wget build-essential
-  rm -rf /var/lib/apt/lists/*
-else
-  sudo apt-get update -qq
-  sudo apt-get upgrade -y -qq
-  sudo apt-get install -y -qq swig liblzma-dev libboost-all-dev cmake git wget build-essential
-  sudo rm -rf /var/lib/apt/lists/*
-fi
-
+APT="apt-get"
+[ "$(id -u)" -ne 0 ] && APT="sudo apt-get"
+$APT update -qq
+$APT install -y -qq swig liblzma-dev libboost-all-dev cmake git wget build-essential
 export BOOST_ROOT=/usr
 
-# ── Move into NeMo path ───────────────────────────────────────────────────────
+# ── OpenSeq2Seq decoders ──────────────────────────────────────────────────────
+echo "==> Setting up OpenSeq2Seq decoders..."
 cd "$NEMO_PATH"
 
-# ── Clone & prepare OpenSeq2Seq decoders ─────────────────────────────────────
-echo "==> Setting up OpenSeq2Seq decoders..."
-if [ -d "decoders" ]; then
-  echo "    'decoders' directory already exists, skipping clone."
-else
+DECODERS_DIR="$NEMO_PATH/decoders"
+
+if [ ! -f "$DECODERS_DIR/setup.py" ]; then
+  rm -rf OpenSeq2Seq
   git clone https://github.com/NVIDIA/OpenSeq2Seq
   cd OpenSeq2Seq
   git checkout ctc-decoders
   cd ..
-  mv OpenSeq2Seq/decoders "$NEMO_PATH/"
+
+  # mkdir -p handles the case where decoders/ does not exist yet
+  # cp -rn handles the case where it already exists (no-clobber merge)
+  mkdir -p "$DECODERS_DIR"
+  cp -rn OpenSeq2Seq/decoders/. "$DECODERS_DIR/"
   rm -rf OpenSeq2Seq
-fi
 
-cd "$NEMO_PATH/decoders"
-
-if [ -f "$NEMO_PATH/scripts/installers/setup_os2s_decoders.py" ]; then
-  cp "$NEMO_PATH/scripts/installers/setup_os2s_decoders.py" ./setup.py
+  SETUP_SRC="$NEMO_PATH/scripts/installers/setup_os2s_decoders.py"
+  if [ -f "$SETUP_SRC" ]; then
+    cp "$SETUP_SRC" "$DECODERS_DIR/setup.py"
+  else
+    echo "Warning: setup_os2s_decoders.py not found at $SETUP_SRC"
+  fi
 else
-  echo "Warning: setup_os2s_decoders.py not found — skipping copy."
+  echo "    setup.py already present, skipping OpenSeq2Seq clone."
 fi
 
-# ── Build OpenFST ─────────────────────────────────────────────────────────────
+cd "$DECODERS_DIR"
+
+# ── OpenFST ───────────────────────────────────────────────────────────────────
 echo "==> Building OpenFST..."
-if [ ! -d "openfst-1.6.3" ]; then
+if [ ! -f "openfst-1.6.3/src/lib/.libs/libfst.so" ]; then
+  rm -rf openfst-1.6.3 openfst.tar.gz
   wget -q https://github.com/kkm000/openfst/archive/refs/tags/win/1.6.3.1.tar.gz -O openfst.tar.gz
   tar -xzf openfst.tar.gz
   mv openfst-win-1.6.3.1 openfst-1.6.3
   rm -f openfst.tar.gz
-fi
-
-if [ ! -f "openfst-1.6.3/src/lib/.libs/libfst.so" ]; then
   cd openfst-1.6.3
   ./configure --enable-static --enable-shared --enable-far --enable-ngram-fsts
   make -j"$(nproc)"
@@ -86,56 +68,63 @@ else
   echo "    OpenFST already built, skipping."
 fi
 
-# ── Clone & build KenLM ───────────────────────────────────────────────────────
+# ── KenLM ─────────────────────────────────────────────────────────────────────
 echo "==> Setting up KenLM..."
-if [ ! -d "kenlm" ]; then
+if [ ! -f "kenlm/CMakeLists.txt" ]; then
+  rm -rf kenlm
   git clone https://github.com/kpu/kenlm kenlm
 else
-  echo "    kenlm directory already exists, skipping clone."
+  echo "    kenlm source already present, skipping clone."
 fi
 
-mkdir -p kenlm/build
-cd kenlm/build
+export KENLM_ROOT="$DECODERS_DIR/kenlm"
 
-if [ ! -f "Makefile" ] && [ ! -f "build.ninja" ]; then
-  cmake .. \
-    -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER \
-    -DCMAKE_BUILD_TYPE=Release
+if [ ! -f "$KENLM_ROOT/build/lib/libkenlm.a" ]; then
+  mkdir -p "$KENLM_ROOT/build"
+  cd "$KENLM_ROOT/build"
+  cmake .. -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER -DCMAKE_BUILD_TYPE=Release
+  make -j"$(nproc)"
+  cd "$DECODERS_DIR"
+else
+  echo "    KenLM already built, skipping cmake/make."
 fi
-
-make -j"$(nproc)"
-cd ../..   # back to decoders/
-
-export KENLM_ROOT="$NEMO_PATH/decoders/kenlm"
-export KENLM_LIB="$NEMO_PATH/decoders/kenlm/build/bin"
 
 echo "==> Installing KenLM Python bindings..."
-cd "$NEMO_PATH/decoders/kenlm"
-python setup.py install --max_order=$KENLM_MAX_ORDER
-cd "$NEMO_PATH/decoders"
+if ! python -c "import kenlm" 2>/dev/null; then
+  cd "$KENLM_ROOT"
+  python setup.py install --max_order=$KENLM_MAX_ORDER
+  cd "$DECODERS_DIR"
+else
+  echo "    kenlm Python package already installed, skipping."
+fi
 
-# ── Build ctc_decoders ────────────────────────────────────────────────────────
+# ── ctc_decoders ──────────────────────────────────────────────────────────────
 echo "==> Building ctc_decoders..."
-if [ ! -f "setup.py" ]; then
-  echo "Error: setup.py not found in $NEMO_PATH/decoders. Cannot build ctc_decoders."
+
+if [ ! -f "$DECODERS_DIR/setup.py" ]; then
+  echo "Error: setup.py missing from $DECODERS_DIR. Cannot build ctc_decoders."
   exit 1
 fi
 
-# Ensure KenLM headers are findable
+# Expose all KenLM header paths the compiler needs
 export CPLUS_INCLUDE_PATH="$KENLM_ROOT:$KENLM_ROOT/lm:${CPLUS_INCLUDE_PATH:-}"
 
+cd "$DECODERS_DIR"
 python setup.py build_ext --inplace
 
-# ── Install Flashlight Text ───────────────────────────────────────────────────
+# ── Flashlight Text ───────────────────────────────────────────────────────────
 echo "==> Installing flashlight-text..."
-if [ ! -d "text" ]; then
+if ! python -c "from flashlight.lib.text.decoder import CpuBeamSearchDecoder" 2>/dev/null; then
+  cd "$DECODERS_DIR"
+  rm -rf text
   git clone https://github.com/flashlight/text
+  cd text
+  KENLM_ROOT="$KENLM_ROOT" python setup.py bdist_wheel
+  pip install dist/*.whl --force-reinstall
+  cd "$DECODERS_DIR"
+else
+  echo "    flashlight-text already installed, skipping."
 fi
 
-cd text
-python setup.py bdist_wheel
-pip install dist/*.whl --force-reinstall
-cd ..
-
 echo ""
-echo "All done! ctc_decoders and flashlight-text are installed."
+echo "Done! ctc_decoders and flashlight-text are installed."
