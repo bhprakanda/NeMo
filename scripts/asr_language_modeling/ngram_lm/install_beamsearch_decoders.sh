@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Use this script to install KenLM, OpenSeq2Seq decoder, Flashlight decoder
 shopt -s expand_aliases
 
-NEMO_PATH=/workspace/nemo  # Path to NeMo folder: /workspace/nemo if you use NeMo/Dockerfile
+NEMO_PATH=/workspace/nemo
 if [ "$#" -eq 1 ]; then
   NEMO_PATH=$1
 fi
-KENLM_MAX_ORDER=10 # Maximum order of KenLM model, also specified in the setup_os2s_decoders.py
+KENLM_MAX_ORDER=10
 
 if [ -d "$NEMO_PATH" ]; then
   echo "The folder '$NEMO_PATH' exists."
@@ -59,17 +58,23 @@ cd openfst-1.6.3
 make -j4
 cd ..
 
-python setup.py build_ext --inplace
-
-# install KenLM
-cd $NEMO_PATH/decoders/kenlm/build && cmake -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER .. && make -j2
-cd $NEMO_PATH/decoders/kenlm
-python setup.py install --max_order=$KENLM_MAX_ORDER
+# Build KenLM FIRST (must happen before python setup.py, as scorer.h depends on kenlm headers)
+mkdir -p $NEMO_PATH/decoders/kenlm/build
+cd $NEMO_PATH/decoders/kenlm/build
+cmake -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER ..
+make -j2
 export KENLM_LIB=$NEMO_PATH/decoders/kenlm/build/bin
 export KENLM_ROOT=$NEMO_PATH/decoders/kenlm
-cd ..
 
-# install Flashlight
+# Install KenLM Python bindings
+cd $NEMO_PATH/decoders/kenlm
+python setup.py install --max_order=$KENLM_MAX_ORDER
+
+# Now build the ctc_decoders extension (KenLM headers are available)
+cd $NEMO_PATH/decoders
+python setup.py build_ext --inplace
+
+# Install Flashlight
 git clone https://github.com/flashlight/text && cd text
 python setup.py bdist_wheel
 pip install dist/*.whl
