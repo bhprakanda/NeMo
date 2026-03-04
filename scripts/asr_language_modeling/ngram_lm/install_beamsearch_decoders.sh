@@ -29,27 +29,28 @@ rm -rf "$DECODERS_DIR/openfst.tar.gz"
 rm -rf "$DECODERS_DIR/kenlm"
 rm -rf "$DECODERS_DIR/text"
 rm -rf "$DECODERS_DIR/build"
+rm -rf "$DECODERS_DIR/ThreadPool"
 rm -f  "$DECODERS_DIR/_swig_decoders"*.so 2>/dev/null || true
 
 # ── OpenSeq2Seq decoders ──────────────────────────────────────────────────────
 echo "==> Setting up OpenSeq2Seq decoders..."
 cd "$NEMO_PATH"
 
-# Always re-clone to ensure ThreadPool submodule is present
-rm -rf "$DECODERS_DIR/ThreadPool"
-git clone --recurse-submodules https://github.com/NVIDIA/OpenSeq2Seq
+git clone https://github.com/NVIDIA/OpenSeq2Seq
 cd OpenSeq2Seq
 git checkout ctc-decoders
-git submodule update --init --recursive
 cd "$NEMO_PATH"
 
 mkdir -p "$DECODERS_DIR"
 cp -rf OpenSeq2Seq/decoders/. "$DECODERS_DIR/"
 rm -rf OpenSeq2Seq
 
-# Verify ThreadPool landed
+# ThreadPool is not a registered submodule on ctc-decoders — clone directly
+echo "==> Cloning ThreadPool..."
+git clone https://github.com/progschj/ThreadPool "$DECODERS_DIR/ThreadPool"
+
 if [ ! -f "$DECODERS_DIR/ThreadPool/ThreadPool.h" ]; then
-  echo "ERROR: ThreadPool.h still missing after clone. Aborting."
+  echo "ERROR: ThreadPool.h missing after clone. Aborting."
   exit 1
 fi
 echo "    ThreadPool.h verified."
@@ -108,7 +109,6 @@ cd "$DECODERS_DIR"
 echo "==> Building ctc_decoders..."
 cd "$DECODERS_DIR"
 
-# Verify prerequisites
 if [ ! -f "$KENLM_ROOT/lm/enumerate_vocab.hh" ]; then
   echo "ERROR: KenLM header missing: $KENLM_ROOT/lm/enumerate_vocab.hh"
   exit 1
