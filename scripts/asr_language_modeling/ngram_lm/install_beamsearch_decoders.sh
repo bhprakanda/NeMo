@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-shopt -s expand_aliases
+set -euo pipefail
 
 NEMO_PATH=/workspace/nemo
 if [ "$#" -eq 1 ]; then
@@ -27,55 +27,115 @@ else
   echo "Error: The folder '$NEMO_PATH' does not exist. Specify it as a first command line positional argument!"
   exit 1
 fi
-cd $NEMO_PATH
 
-if [ $(id -u) -eq 0 ]; then
-  alias aptupdate='apt-get update'
+# ── System dependencies ──────────────────────────────────────────────────────
+echo "==> Installing system dependencies..."
+if [ "$(id -u)" -eq 0 ]; then
+  apt-get update -qq
+  apt-get upgrade -y -qq
+  apt-get install -y -qq swig liblzma-dev libboost-all-dev cmake git wget build-essential
+  rm -rf /var/lib/apt/lists/*
 else
-  alias aptupdate='sudo apt-get update'
+  sudo apt-get update -qq
+  sudo apt-get upgrade -y -qq
+  sudo apt-get install -y -qq swig liblzma-dev libboost-all-dev cmake git wget build-essential
+  sudo rm -rf /var/lib/apt/lists/*
 fi
 
-aptupdate && apt-get upgrade -y && apt-get install -y swig liblzma-dev libboost-all-dev && rm -rf /var/lib/apt/lists/*
-
-# Use system Boost installed via apt (replaces broken JFrog download URL)
 export BOOST_ROOT=/usr
 
-git clone https://github.com/NVIDIA/OpenSeq2Seq
-cd OpenSeq2Seq
-git checkout ctc-decoders
-cd ..
-mv OpenSeq2Seq/decoders $NEMO_PATH/
-rm -rf OpenSeq2Seq
-cd $NEMO_PATH/decoders
-cp $NEMO_PATH/scripts/installers/setup_os2s_decoders.py ./setup.py
+# ── Move into NeMo path ───────────────────────────────────────────────────────
+cd "$NEMO_PATH"
 
-# Download OpenFST from GitHub mirror (replaces dead openfst.org URL)
-wget https://github.com/kkm000/openfst/archive/refs/tags/win/1.6.3.1.tar.gz -O openfst.tar.gz
-tar -xzf openfst.tar.gz
-mv openfst-win-1.6.3.1 openfst-1.6.3
-cd openfst-1.6.3
-./configure --enable-static --enable-shared --enable-far --enable-ngram-fsts
-make -j4
-cd ..
+# ── Clone & prepare OpenSeq2Seq decoders ─────────────────────────────────────
+echo "==> Setting up OpenSeq2Seq decoders..."
+if [ -d "decoders" ]; then
+  echo "    'decoders' directory already exists, skipping clone."
+else
+  git clone https://github.com/NVIDIA/OpenSeq2Seq
+  cd OpenSeq2Seq
+  git checkout ctc-decoders
+  cd ..
+  mv OpenSeq2Seq/decoders "$NEMO_PATH/"
+  rm -rf OpenSeq2Seq
+fi
 
-# Build KenLM FIRST (must happen before python setup.py, as scorer.h depends on kenlm headers)
-mkdir -p $NEMO_PATH/decoders/kenlm/build
-cd $NEMO_PATH/decoders/kenlm/build
-cmake -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER ..
-make -j2
-export KENLM_LIB=$NEMO_PATH/decoders/kenlm/build/bin
-export KENLM_ROOT=$NEMO_PATH/decoders/kenlm
+cd "$NEMO_PATH/decoders"
 
-# Install KenLM Python bindings
-cd $NEMO_PATH/decoders/kenlm
+if [ -f "$NEMO_PATH/scripts/installers/setup_os2s_decoders.py" ]; then
+  cp "$NEMO_PATH/scripts/installers/setup_os2s_decoders.py" ./setup.py
+else
+  echo "Warning: setup_os2s_decoders.py not found — skipping copy."
+fi
+
+# ── Build OpenFST ─────────────────────────────────────────────────────────────
+echo "==> Building OpenFST..."
+if [ ! -d "openfst-1.6.3" ]; then
+  wget -q https://github.com/kkm000/openfst/archive/refs/tags/win/1.6.3.1.tar.gz -O openfst.tar.gz
+  tar -xzf openfst.tar.gz
+  mv openfst-win-1.6.3.1 openfst-1.6.3
+  rm -f openfst.tar.gz
+fi
+
+if [ ! -f "openfst-1.6.3/src/lib/.libs/libfst.so" ]; then
+  cd openfst-1.6.3
+  ./configure --enable-static --enable-shared --enable-far --enable-ngram-fsts
+  make -j"$(nproc)"
+  cd ..
+else
+  echo "    OpenFST already built, skipping."
+fi
+
+# ── Clone & build KenLM ───────────────────────────────────────────────────────
+echo "==> Setting up KenLM..."
+if [ ! -d "kenlm" ]; then
+  git clone https://github.com/kpu/kenlm kenlm
+else
+  echo "    kenlm directory already exists, skipping clone."
+fi
+
+mkdir -p kenlm/build
+cd kenlm/build
+
+if [ ! -f "Makefile" ] && [ ! -f "build.ninja" ]; then
+  cmake .. \
+    -DKENLM_MAX_ORDER=$KENLM_MAX_ORDER \
+    -DCMAKE_BUILD_TYPE=Release
+fi
+
+make -j"$(nproc)"
+cd ../..   # back to decoders/
+
+export KENLM_ROOT="$NEMO_PATH/decoders/kenlm"
+export KENLM_LIB="$NEMO_PATH/decoders/kenlm/build/bin"
+
+echo "==> Installing KenLM Python bindings..."
+cd "$NEMO_PATH/decoders/kenlm"
 python setup.py install --max_order=$KENLM_MAX_ORDER
+cd "$NEMO_PATH/decoders"
 
-# Now build the ctc_decoders extension (KenLM headers are available)
-cd $NEMO_PATH/decoders
+# ── Build ctc_decoders ────────────────────────────────────────────────────────
+echo "==> Building ctc_decoders..."
+if [ ! -f "setup.py" ]; then
+  echo "Error: setup.py not found in $NEMO_PATH/decoders. Cannot build ctc_decoders."
+  exit 1
+fi
+
+# Ensure KenLM headers are findable
+export CPLUS_INCLUDE_PATH="$KENLM_ROOT:$KENLM_ROOT/lm:${CPLUS_INCLUDE_PATH:-}"
+
 python setup.py build_ext --inplace
 
-# Install Flashlight
-git clone https://github.com/flashlight/text && cd text
+# ── Install Flashlight Text ───────────────────────────────────────────────────
+echo "==> Installing flashlight-text..."
+if [ ! -d "text" ]; then
+  git clone https://github.com/flashlight/text
+fi
+
+cd text
 python setup.py bdist_wheel
-pip install dist/*.whl
+pip install dist/*.whl --force-reinstall
 cd ..
+
+echo ""
+echo "All done! ctc_decoders and flashlight-text are installed."
