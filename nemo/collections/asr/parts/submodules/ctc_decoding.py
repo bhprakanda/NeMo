@@ -189,7 +189,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
             The id of the RNNT blank token.
     """
 
-    def __init__(self, decoding_cfg, blank_id: int, lang_id: str = None):
+    def __init__(self, decoding_cfg, blank_id: int):
         super().__init__()
 
         # Convert dataclas to config
@@ -315,7 +315,6 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 beam_beta=self.cfg.beam.get("beam_beta", 0.0),
                 kenlm_path=self.cfg.beam.get("kenlm_path", None),
                 flashlight_cfg=self.cfg.beam.get("flashlight_cfg", None),
-                lang_id=lang_id,
             )
 
             self.decoding.override_fold_consecutive_value = False
@@ -1281,7 +1280,7 @@ class CTCBPEDecoding(AbstractCTCDecoding):
             blank_id = tokenizer.tokenizer.vocab_size
         self.tokenizer = tokenizer
 
-        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id, lang_id=lang_id)
+        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id)
 
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):

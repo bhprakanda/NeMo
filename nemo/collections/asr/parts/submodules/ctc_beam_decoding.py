@@ -196,7 +196,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         kenlm_path: str = None,
         flashlight_cfg: Optional["FlashlightConfig"] = None,
         pyctcdecode_cfg: Optional["PyCTCDecodeConfig"] = None,
-        lang_id: str = None,
     ):
         super().__init__(blank_id=blank_id, beam_size=beam_size)
 
@@ -204,7 +203,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         self.return_best_hypothesis = return_best_hypothesis
         self.preserve_alignments = preserve_alignments
         self.compute_timestamps = compute_timestamps
-        self.lang_id = lang_id
 
         if self.compute_timestamps:
             raise ValueError(
@@ -552,7 +550,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             self.flashlight_beam_scorer = FlashLightKenLMBeamSearchDecoder(
                 lm_path=self.kenlm_path,
                 vocabulary=self.vocab,
-                lang_id=self.lang_id,
                 tokenizer=self.tokenizer,
                 lexicon_path=self.flashlight_cfg.lexicon_path,
                 boost_path=self.flashlight_cfg.boost_path,
