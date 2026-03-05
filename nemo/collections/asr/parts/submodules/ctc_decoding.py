@@ -27,7 +27,10 @@ from nemo.collections.asr.parts.utils.asr_confidence_utils import (
     ConfidenceMixin,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses
-from nemo.collections.common.tokenizers.aggregate_tokenizer import DummyTokenizer
+from nemo.collections.common.tokenizers.aggregate_tokenizer import (
+    AggregateTokenizer,
+    DummyTokenizer,
+)
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging, logging_mode
 
@@ -189,7 +192,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
             The id of the RNNT blank token.
     """
 
-    def __init__(self, decoding_cfg, blank_id: int):
+    def __init__(self, decoding_cfg, blank_id: int, lang_id: str = None):
         super().__init__()
 
         # Convert dataclas to config
@@ -315,6 +318,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 beam_beta=self.cfg.beam.get("beam_beta", 0.0),
                 kenlm_path=self.cfg.beam.get("kenlm_path", None),
                 flashlight_cfg=self.cfg.beam.get("flashlight_cfg", None),
+                lang_id=lang_id,
             )
 
             self.decoding.override_fold_consecutive_value = False
@@ -378,8 +382,11 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
         with torch.inference_mode():
             # Resolve the forward step of the decoding strategy
+            # Pass lang_ids to the decoder
             hypotheses_list = self.decoding(
-                decoder_output=decoder_outputs, decoder_lengths=decoder_lengths
+                decoder_output=decoder_outputs,
+                decoder_lengths=decoder_lengths,
+                lang_ids=lang_ids,  # CTEMO
             )  # type: List[List[Hypothesis]]
 
             # extract the hypotheses
@@ -582,7 +589,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
         return hypotheses_list
 
     @abstractmethod
-    def decode_tokens_to_str(self, tokens: List[int]) -> str:
+    def decode_tokens_to_str(self, tokens: List[int], lang: str = None) -> str:
         """
         Implemented by subclass in order to decoder a token id list into a string.
 
@@ -1094,7 +1101,7 @@ class CTCDecoding(AbstractCTCDecoding):
             hypothesis.token_confidence,
         )
 
-    def decode_tokens_to_str(self, tokens: List[int]) -> str:
+    def decode_tokens_to_str(self, tokens: List[int], lang: str = None) -> str:
         """
         Implemented by subclass in order to decoder a token list into a string.
 
@@ -1280,7 +1287,16 @@ class CTCBPEDecoding(AbstractCTCDecoding):
             blank_id = tokenizer.tokenizer.vocab_size
         self.tokenizer = tokenizer
 
-        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id)
+        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id, lang_id=lang_id)
+
+        # CTEMO: Determine language parameters for multilingual models
+        self.num_langs = 1
+        self.vocab_size_per_lang = blank_id
+        if isinstance(self.tokenizer, AggregateTokenizer):
+            self.num_langs = len(self.tokenizer.tokenizers_dict)
+            # blank_id is total vocab size, which is num_langs * (vocab_per_lang + 1)
+            self.vocab_size_per_lang = blank_id // self.num_langs - 1
+        # CTEMO end
 
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):
@@ -1299,6 +1315,10 @@ class CTCBPEDecoding(AbstractCTCDecoding):
                     vocab = list(vocab_dict.keys())
                 self.decoding.set_vocabulary(vocab)
                 self.decoding.set_tokenizer(tokenizer)
+                # CTEMO: set language parameters
+                self.decoding.set_language_params(
+                    self.num_langs, self.vocab_size_per_lang, self.tokenizer
+                )
             else:
                 logging.warning("Could not resolve the vocabulary of the tokenizer !")
 
