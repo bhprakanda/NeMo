@@ -591,7 +591,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
     @abstractmethod
     def decode_tokens_to_str(self, tokens: List[int], lang: str = None) -> str:
         """
-        Implemented by subclass in order to decoder a token id list into a string.
+        Implemented by subclass in order to decoder a token list into a string.
 
         Args:
             tokens: List of int representing the token ids.
