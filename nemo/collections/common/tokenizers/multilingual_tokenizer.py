@@ -16,15 +16,15 @@ from typing import Dict, List, Union
 
 import numpy as np
 
-from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.collections.common.tokenizers.aggregate_tokenizer import DummyTokenizer
+from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging
 
-__all__ = ['MultilingualTokenizer']
+__all__ = ["MultilingualTokenizer"]
 
 
 class MultilingualTokenizer(TokenizerSpec):
-    '''
+    """
     MultilingualTokenizer, allowing one to combine multiple regular monolongual tokenizers into one tokenizer.
     The intuition is that we can use existing tokenizers "as is", without retraining, and associate each tokenizer with a language id
     during text processing (language id will be used to route the incoming text sample to the right tokenizer)
@@ -33,10 +33,9 @@ class MultilingualTokenizer(TokenizerSpec):
     is ordered, e.g. the first tokenizer will be assigned a lower interval of token ids
         Args:
         tokenizers: dict of tokenizers, keys are lang ids, values are actual tokenizers
-    '''
+    """
 
     def __init__(self, tokenizers: Dict):
-
         self.tokenizers_dict = tokenizers
         self.vocabulary = []
 
@@ -58,7 +57,7 @@ class MultilingualTokenizer(TokenizerSpec):
             self.vocabulary.extend(tokenizer.vocab)
 
         self.vocab_size = len(self.vocabulary)
-        logging.info(f'Aggregate vocab size: {self.vocab_size}')
+        logging.info(f"Aggregate vocab size: {self.vocab_size}")
 
         # for compatibility purposes only -- right now only the get_vocab method
         # is supported, returning the joint vocab across all tokenizers
@@ -70,7 +69,9 @@ class MultilingualTokenizer(TokenizerSpec):
         # one, to convert the incoming token id -- e.g. 200 into its real id (200-127 = 73)
         # second, to compute the tokenizer id that should process that token (1)
         # third, the compute the lang id for that token ('es')
-        offset_token_ids_by_token_id, tokenizers_by_token_id, langs_by_token_id = self._calculate_offsets()
+        offset_token_ids_by_token_id, tokenizers_by_token_id, langs_by_token_id = (
+            self._calculate_offsets()
+        )
 
         self.offset_token_ids_by_token_id = offset_token_ids_by_token_id
         self.tokenizers_by_token_id = tokenizers_by_token_id
@@ -115,17 +116,19 @@ class MultilingualTokenizer(TokenizerSpec):
     def ids_to_text(self, ids, lang):
         if isinstance(ids, np.ndarray):
             ids = ids.tolist()
-
-        tokens = []
         tokenizer = self.tokenizers_dict[lang]
+        offset = self.token_id_offset[lang]
+        vocab_size = len(tokenizer.vocab)
+        tokens = []
         for id in ids:
-            # offset_id = self.offset_token_ids_by_token_id[id]
-            # tokenizer = self.tokenizers_by_token_id[id]
-            # tokens.extend(tokenizer.ids_to_tokens([offset_id]))
-            tokens.extend(tokenizer.ids_to_tokens([id]))
-        text = ''.join(tokens).replace('▁', ' ')
-
-        return text
+            if 0 <= id < vocab_size:
+                local_id = id
+            elif offset <= id < offset + vocab_size:
+                local_id = id - offset
+            else:
+                continue
+            tokens.extend(tokenizer.ids_to_tokens([local_id]))
+        return "".join(tokens).replace("▁", " ").strip()
 
     def token_to_id(self, token, lang_id):
         tokenizer = self.tokenizers_dict[lang_id]
@@ -144,10 +147,10 @@ class MultilingualTokenizer(TokenizerSpec):
             offset_id = self.offset_token_ids_by_token_id[id]
             tokenizer = self.tokenizers_by_token_id[id]
             token = tokenizer.ids_to_tokens([offset_id])[0]
-            text = token.replace('▁', ' ')
+            text = token.replace("▁", " ")
             text = text.strip()  # strip for display purposes
             lang = self.langs_by_token_id[id]
-            text_and_langs.append({'char': text, 'lang': lang})
+            text_and_langs.append({"char": text, "lang": lang})
 
         return text_and_langs
 
@@ -159,12 +162,12 @@ class MultilingualTokenizer(TokenizerSpec):
             offset_id = self.offset_token_ids_by_token_id[id]
             tokenizer = self.tokenizers_by_token_id[id]
             token = tokenizer.ids_to_tokens([offset_id])[0]
-            if token.startswith('▁'):
+            if token.startswith("▁"):
                 if len(word_ids) > 0:  # if this isn't the first word
                     word = self.ids_to_text(word_ids)
                     word = word.strip()  # strip for display purposes
                     lang = self.ids_to_lang(word_ids)
-                    wl = {'word': word, 'lang': lang}
+                    wl = {"word": word, "lang": lang}
                     words_and_langs.append(wl)
                 word_ids = []
             word_ids.append(id)
@@ -173,7 +176,7 @@ class MultilingualTokenizer(TokenizerSpec):
             word = self.ids_to_text(word_ids)
             word = word.strip()  # strip for display purposes
             lang = self.ids_to_lang(word_ids)
-            wl = {'word': word, 'lang': lang}
+            wl = {"word": word, "lang": lang}
             words_and_langs.append(wl)
 
         return words_and_langs
@@ -189,7 +192,7 @@ class MultilingualTokenizer(TokenizerSpec):
             else:
                 lang_cnts[lang] = 1
 
-        max_lang = ''
+        max_lang = ""
         max_lang_cnt = -1
         for lang, lang_cnt in lang_cnts.items():
             if lang_cnt > max_lang_cnt:
@@ -198,7 +201,9 @@ class MultilingualTokenizer(TokenizerSpec):
 
         return max_lang
 
-    def tokens_to_ids(self, tokens: Union[str, List[str]], langs: Union[str, List[str]]) -> Union[int, List[int]]:
+    def tokens_to_ids(
+        self, tokens: Union[str, List[str]], langs: Union[str, List[str]]
+    ) -> Union[int, List[int]]:
         if isinstance(tokens, str):
             tokens = [tokens]
         if isinstance(langs, str):

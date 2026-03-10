@@ -21,20 +21,28 @@ from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
 
 from nemo.collections.asr.data import audio_to_text_dataset
-from nemo.collections.asr.data.audio_to_text_dali import AudioToBPEDALIDataset
+from nemo.collections.asr.data.audio_to_text_dali import (
+    AudioToBPEDALIDataset,
+    DALIOutputs,
+)
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.losses.rnnt import RNNTLoss
 from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
-from nemo.core.classes.mixins import AccessMixin
-from nemo.collections.asr.parts.submodules.ctc_decoding import CTCBPEDecoding, CTCBPEDecodingConfig
-from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTBPEDecoding, RNNTBPEDecodingConfig
+from nemo.collections.asr.parts.submodules.ctc_decoding import (
+    CTCBPEDecoding,
+    CTCBPEDecodingConfig,
+)
+from nemo.collections.asr.parts.submodules.rnnt_decoding import (
+    RNNTBPEDecoding,
+    RNNTBPEDecodingConfig,
+)
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.core.classes.common import PretrainedModelInfo
+from nemo.core.classes.mixins import AccessMixin
 from nemo.utils import logging, model_utils
-from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
 
 
 class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
@@ -46,8 +54,10 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         cfg = model_utils.maybe_update_config_version(cfg)
 
         # Tokenizer is necessary for this model
-        if 'tokenizer' not in cfg:
-            raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
+        if "tokenizer" not in cfg:
+            raise ValueError(
+                "`cfg` must have `tokenizer` config to create a tokenizer !"
+            )
 
         if not isinstance(cfg, DictConfig):
             cfg = OmegaConf.create(cfg)
@@ -72,13 +82,15 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             cfg.joint.jointnet.pred_hidden = cfg.model_defaults.pred_hidden
 
         # setup auxiliary CTC decoder
-        if 'aux_ctc' not in cfg:
+        if "aux_ctc" not in cfg:
             raise ValueError(
                 "The config need to have a section for the CTC decoder named as aux_ctc for Hybrid models."
             )
 
         with open_dict(cfg):
-            if self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual": #CTEMO
+            if (
+                self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+            ):  # CTEMO
                 cfg.aux_ctc.decoder.vocabulary = ListConfig(vocabulary)
             else:
                 cfg.aux_ctc.decoder.vocabulary = ListConfig(list(vocabulary.keys()))
@@ -96,37 +108,56 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         self.cfg.decoding = self.set_decoding_type_according_to_loss(self.cfg.decoding)
         # Setup decoding object
         self.decoding = RNNTBPEDecoding(
-            decoding_cfg=self.cfg.decoding, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+            decoding_cfg=self.cfg.decoding,
+            decoder=self.decoder,
+            joint=self.joint,
+            tokenizer=self.tokenizer,
         )
 
         # Multisoftmax #CTEMO
         self.language_masks = None
-        if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in cfg.decoder:
+        if (
+            self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+        ) and "multisoftmax" in cfg.decoder:
             logging.info("Creating masks for multi-softmax layer.")
             self.language_masks = {}
             self.token_id_offsets = self.tokenizer.token_id_offset
-            self.offset_token_ids_by_token_id = self.tokenizer.offset_token_ids_by_token_id
+            self.offset_token_ids_by_token_id = (
+                self.tokenizer.offset_token_ids_by_token_id
+            )
             for language in self.tokenizer.tokenizers_dict.keys():
-                self.language_masks[language] = [(token_language == language)  for _, token_language in self.tokenizer.langs_by_token_id.items()]
-                self.language_masks[language].append(True) # Insert blank token
+                self.language_masks[language] = [
+                    (token_language == language)
+                    for _, token_language in self.tokenizer.langs_by_token_id.items()
+                ]
+                self.language_masks[language].append(True)  # Insert blank token
             self.ctc_loss = CTCLoss(
-                num_classes=self.ctc_decoder._num_classes // len(self.tokenizer.tokenizers_dict.keys()),
+                num_classes=self.ctc_decoder._num_classes
+                // len(self.tokenizer.tokenizers_dict.keys()),
                 zero_infinity=True,
                 reduction=self.cfg.aux_ctc.get("ctc_reduction", "mean_batch"),
             )
             # Setup RNNT Loss
-            loss_name, loss_kwargs = self.extract_rnnt_loss_cfg(self.cfg.get("loss", None))
+            loss_name, loss_kwargs = self.extract_rnnt_loss_cfg(
+                self.cfg.get("loss", None)
+            )
             self.loss = RNNTLoss(
-                num_classes=self.ctc_decoder._num_classes // len(self.tokenizer.tokenizers_dict.keys()),
+                num_classes=self.ctc_decoder._num_classes
+                // len(self.tokenizer.tokenizers_dict.keys()),
                 loss_name=loss_name,
                 loss_kwargs=loss_kwargs,
                 reduction=self.cfg.get("rnnt_reduction", "mean_batch"),
             )
             # Setup decoding object
             self.decoding = RNNTBPEDecoding(
-                decoding_cfg=self.cfg.decoding, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes // len(self.tokenizer.tokenizers_dict.keys())
+                decoding_cfg=self.cfg.decoding,
+                decoder=self.decoder,
+                joint=self.joint,
+                tokenizer=self.tokenizer,
+                blank_id=self.ctc_decoder._num_classes
+                // len(self.tokenizer.tokenizers_dict.keys()),
             )
-            
+
             self.decoder.language_masks = self.language_masks
             self.joint.language_masks = self.language_masks
             self.joint.token_id_offsets = self.token_id_offsets
@@ -137,8 +168,8 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         self.wer = WER(
             decoding=self.decoding,
             batch_dim_index=0,
-            use_cer=self.cfg.get('use_cer', False),
-            log_prediction=self.cfg.get('log_prediction', True),
+            use_cer=self.cfg.get("use_cer", False),
+            log_prediction=self.cfg.get("log_prediction", True),
             dist_sync_on_step=True,
         )
 
@@ -148,20 +179,29 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             self.joint.set_wer(self.wer)
 
         # Setup CTC decoding
-        ctc_decoding_cfg = self.cfg.aux_ctc.get('decoding', None)
+        ctc_decoding_cfg = self.cfg.aux_ctc.get("decoding", None)
         if ctc_decoding_cfg is None:
             ctc_decoding_cfg = OmegaConf.structured(CTCBPEDecodingConfig)
             with open_dict(self.cfg.aux_ctc):
                 self.cfg.aux_ctc.decoding = ctc_decoding_cfg
-        if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in cfg.decoder: #CTEMO
-            self.ctc_decoding = CTCBPEDecoding(self.cfg.aux_ctc.decoding, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes//len(self.tokenizer.tokenizers_dict.keys()))
+        if (
+            self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+        ) and "multisoftmax" in cfg.decoder:  # CTEMO
+            self.ctc_decoding = CTCBPEDecoding(
+                self.cfg.aux_ctc.decoding,
+                tokenizer=self.tokenizer,
+                blank_id=self.ctc_decoder._num_classes
+                // len(self.tokenizer.tokenizers_dict.keys()),
+            )
         else:
-            self.ctc_decoding = CTCBPEDecoding(self.cfg.aux_ctc.decoding, tokenizer=self.tokenizer)
+            self.ctc_decoding = CTCBPEDecoding(
+                self.cfg.aux_ctc.decoding, tokenizer=self.tokenizer
+            )
 
         # Setup CTC WER
         self.ctc_wer = WER(
             decoding=self.ctc_decoding,
-            use_cer=self.cfg.aux_ctc.get('use_cer', False),
+            use_cer=self.cfg.aux_ctc.get("use_cer", False),
             dist_sync_on_step=True,
             log_prediction=self.cfg.get("log_prediction", False),
         )
@@ -170,13 +210,14 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         self.cur_decoder = "ctc"
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
-
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(
                 config,
                 global_rank=self.global_rank,
                 world_size=self.world_size,
-                dataset=LhotseSpeechToTextBpeDataset(tokenizer=self.tokenizer,),
+                dataset=LhotseSpeechToTextBpeDataset(
+                    tokenizer=self.tokenizer,
+                ),
             )
 
         dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(
@@ -195,13 +236,13 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             # DALI Dataset implements dataloader interface
             return dataset
 
-        shuffle = config['shuffle']
+        shuffle = config["shuffle"]
         if isinstance(dataset, torch.utils.data.IterableDataset):
             shuffle = False
 
-        if hasattr(dataset, 'collate_fn'):
+        if hasattr(dataset, "collate_fn"):
             collate_fn = dataset.collate_fn
-        elif hasattr(dataset.datasets[0], 'collate_fn'):
+        elif hasattr(dataset.datasets[0], "collate_fn"):
             # support datasets that are lists of entries
             collate_fn = dataset.datasets[0].collate_fn
         else:
@@ -210,15 +251,17 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
         return torch.utils.data.DataLoader(
             dataset=dataset,
-            batch_size=config['batch_size'],
+            batch_size=config["batch_size"],
             collate_fn=collate_fn,
-            drop_last=config.get('drop_last', False),
+            drop_last=config.get("drop_last", False),
             shuffle=shuffle,
-            num_workers=config.get('num_workers', 0),
-            pin_memory=config.get('pin_memory', False),
+            num_workers=config.get("num_workers", 0),
+            pin_memory=config.get("pin_memory", False),
         )
 
-    def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
+    def _setup_transcribe_dataloader(
+        self, config: Dict
+    ) -> "torch.utils.data.DataLoader":
         """
         Setup function for a temporary data loader which wraps the provided audio file.
 
@@ -237,28 +280,34 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             A pytorch DataLoader for the given audio file(s).
         """
 
-        if 'manifest_filepath' in config:
-            manifest_filepath = config['manifest_filepath']
-            batch_size = config['batch_size']
+        if "manifest_filepath" in config:
+            manifest_filepath = config["manifest_filepath"]
+            batch_size = config["batch_size"]
         else:
-            manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
-            batch_size = min(config['batch_size'], len(config['paths2audio_files']))
+            manifest_filepath = os.path.join(config["temp_dir"], "manifest.json")
+            batch_size = min(config["batch_size"], len(config["paths2audio_files"]))
 
         dl_config = {
-            'manifest_filepath': manifest_filepath,
-            'sample_rate': self.preprocessor._sample_rate,
-            'batch_size': batch_size,
-            'shuffle': False,
-            'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
-            'pin_memory': True,
-            'channel_selector': config.get('channel_selector', None),
-            'use_start_end_token': self.cfg.validation_ds.get('use_start_end_token', False),
+            "manifest_filepath": manifest_filepath,
+            "sample_rate": self.preprocessor._sample_rate,
+            "batch_size": batch_size,
+            "shuffle": False,
+            "num_workers": config.get(
+                "num_workers", min(batch_size, os.cpu_count() - 1)
+            ),
+            "pin_memory": True,
+            "channel_selector": config.get("channel_selector", None),
+            "use_start_end_token": self.cfg.validation_ds.get(
+                "use_start_end_token", False
+            ),
         }
 
         if config.get("augmentor"):
-            dl_config['augmentor'] = config.get("augmentor")
+            dl_config["augmentor"] = config.get("augmentor")
 
-        temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config))
+        temporary_datalayer = self._setup_dataloader_from_config(
+            config=DictConfig(dl_config)
+        )
         return temporary_datalayer
 
     def change_vocabulary(
@@ -285,11 +334,11 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
         """
         if isinstance(new_tokenizer_dir, DictConfig):
-            if new_tokenizer_type == 'agg':
+            if new_tokenizer_type == "agg":
                 new_tokenizer_cfg = new_tokenizer_dir
             else:
                 raise ValueError(
-                    f'New tokenizer dir should be a string unless the tokenizer is `agg`, but this tokenizer type is: {new_tokenizer_type}'
+                    f"New tokenizer dir should be a string unless the tokenizer is `agg`, but this tokenizer type is: {new_tokenizer_type}"
                 )
         else:
             new_tokenizer_cfg = None
@@ -299,13 +348,15 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         else:
             if not os.path.isdir(new_tokenizer_dir):
                 raise NotADirectoryError(
-                    f'New tokenizer dir must be non-empty path to a directory. But I got: {new_tokenizer_dir}'
+                    f"New tokenizer dir must be non-empty path to a directory. But I got: {new_tokenizer_dir}"
                 )
 
-            if new_tokenizer_type.lower() not in ('bpe', 'wpe'):
-                raise ValueError(f'New tokenizer type must be either `bpe` or `wpe`')
+            if new_tokenizer_type.lower() not in ("bpe", "wpe"):
+                raise ValueError("New tokenizer type must be either `bpe` or `wpe`")
 
-            tokenizer_cfg = OmegaConf.create({'dir': new_tokenizer_dir, 'type': new_tokenizer_type})
+            tokenizer_cfg = OmegaConf.create(
+                {"dir": new_tokenizer_dir, "type": new_tokenizer_type}
+            )
 
         # Setup the tokenizer
         self._setup_tokenizer(tokenizer_cfg)
@@ -320,7 +371,7 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         else:
             new_joint_config["vocabulary"] = ListConfig(list(vocabulary.keys()))
 
-        new_joint_config['num_classes'] = len(vocabulary)
+        new_joint_config["num_classes"] = len(vocabulary)
         del self.joint
         self.joint = EncDecHybridRNNTCTCBPEModel.from_config_dict(new_joint_config)
 
@@ -343,13 +394,23 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         decoding_cfg = OmegaConf.merge(decoding_cls, decoding_cfg)
         decoding_cfg = self.set_decoding_type_according_to_loss(decoding_cfg)
 
-        if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in self.cfg.decoder: #CTEMO
+        if (
+            self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+        ) and "multisoftmax" in self.cfg.decoder:  # CTEMO
             self.decoding = RNNTBPEDecoding(
-                decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes // len(self.tokenizer.tokenizers_dict.keys())
+                decoding_cfg=decoding_cfg,
+                decoder=self.decoder,
+                joint=self.joint,
+                tokenizer=self.tokenizer,
+                blank_id=self.ctc_decoder._num_classes
+                // len(self.tokenizer.tokenizers_dict.keys()),
             )
         else:
             self.decoding = RNNTBPEDecoding(
-                decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+                decoding_cfg=decoding_cfg,
+                decoder=self.decoder,
+                joint=self.joint,
+                tokenizer=self.tokenizer,
             )
 
         self.wer = WER(
@@ -362,7 +423,8 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
         # Setup fused Joint step
         if self.joint.fuse_loss_wer or (
-            self.decoding.joint_fused_batch_size is not None and self.decoding.joint_fused_batch_size > 0
+            self.decoding.joint_fused_batch_size is not None
+            and self.decoding.joint_fused_batch_size > 0
         ):
             self.joint.set_loss(self.loss)
             self.joint.set_wer(self.wer)
@@ -377,10 +439,12 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         with open_dict(self.cfg.decoding):
             self.cfg.decoding = decoding_cfg
 
-        logging.info(f"Changed tokenizer of the RNNT decoder to {self.joint.vocabulary} vocabulary.")
+        logging.info(
+            f"Changed tokenizer of the RNNT decoder to {self.joint.vocabulary} vocabulary."
+        )
 
         # set up the new tokenizer for the CTC decoder
-        if hasattr(self, 'ctc_decoder'):
+        if hasattr(self, "ctc_decoder"):
             ctc_decoder_config = copy.deepcopy(self.ctc_decoder.to_config_dict())
             # sidestepping the potential overlapping tokens issue in aggregate tokenizers
             if self.tokenizer_type == "agg":
@@ -388,17 +452,19 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             else:
                 ctc_decoder_config.vocabulary = ListConfig(list(vocabulary.keys()))
 
-            decoder_num_classes = ctc_decoder_config['num_classes']
+            decoder_num_classes = ctc_decoder_config["num_classes"]
             # Override number of classes if placeholder provided
             logging.info(
                 "\nReplacing old number of classes ({}) with new number of classes - {}".format(
                     decoder_num_classes, len(vocabulary)
                 )
             )
-            ctc_decoder_config['num_classes'] = len(vocabulary)
+            ctc_decoder_config["num_classes"] = len(vocabulary)
 
             del self.ctc_decoder
-            self.ctc_decoder = EncDecHybridRNNTCTCBPEModel.from_config_dict(ctc_decoder_config)
+            self.ctc_decoder = EncDecHybridRNNTCTCBPEModel.from_config_dict(
+                ctc_decoder_config
+            )
             del self.ctc_loss
             self.ctc_loss = CTCLoss(
                 num_classes=self.ctc_decoder.num_classes_with_blank - 1,
@@ -412,17 +478,28 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
             # Assert the decoding config with all hyper parameters
             ctc_decoding_cls = OmegaConf.structured(CTCBPEDecodingConfig)
-            ctc_decoding_cls = OmegaConf.create(OmegaConf.to_container(ctc_decoding_cls))
+            ctc_decoding_cls = OmegaConf.create(
+                OmegaConf.to_container(ctc_decoding_cls)
+            )
             ctc_decoding_cfg = OmegaConf.merge(ctc_decoding_cls, ctc_decoding_cfg)
 
-            if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in self.cfg.decoder: #CTEMO
-                self.ctc_decoding = CTCBPEDecoding(decoding_cfg=ctc_decoding_cfg, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes//len(self.tokenizer.tokenizers_dict.keys()))
+            if (
+                self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+            ) and "multisoftmax" in self.cfg.decoder:  # CTEMO
+                self.ctc_decoding = CTCBPEDecoding(
+                    decoding_cfg=ctc_decoding_cfg,
+                    tokenizer=self.tokenizer,
+                    blank_id=self.ctc_decoder._num_classes
+                    // len(self.tokenizer.tokenizers_dict.keys()),
+                )
             else:
-                self.ctc_decoding = CTCBPEDecoding(decoding_cfg=ctc_decoding_cfg, tokenizer=self.tokenizer)
+                self.ctc_decoding = CTCBPEDecoding(
+                    decoding_cfg=ctc_decoding_cfg, tokenizer=self.tokenizer
+                )
 
             self.ctc_wer = WER(
                 decoding=self.ctc_decoding,
-                use_cer=self.cfg.aux_ctc.get('use_cer', False),
+                use_cer=self.cfg.aux_ctc.get("use_cer", False),
                 log_prediction=self.cfg.get("log_prediction", False),
                 dist_sync_on_step=True,
             )
@@ -434,9 +511,16 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             with open_dict(self.cfg.aux_ctc):
                 self.cfg.aux_ctc.decoding = ctc_decoding_cfg
 
-            logging.info(f"Changed tokenizer of the CTC decoder to {self.ctc_decoder.vocabulary} vocabulary.")
+            logging.info(
+                f"Changed tokenizer of the CTC decoder to {self.ctc_decoder.vocabulary} vocabulary."
+            )
 
-    def change_decoding_strategy(self, decoding_cfg: DictConfig = None, decoder_type: str = None, lang_id: str=None):
+    def change_decoding_strategy(
+        self,
+        decoding_cfg: DictConfig = None,
+        decoder_type: str = None,
+        lang_id: str = None,
+    ):
         """
         Changes decoding strategy used during RNNT decoding process.
         Args:
@@ -446,10 +530,12 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
                 model having both RNN-T and CTC decoders. Defaults to None, in which case RNN-T decoder is
                 used. If set to 'ctc', it raises error if 'ctc_decoder' is not an attribute of the model.
         """
-        if decoder_type is None or decoder_type == 'rnnt':
+        if decoder_type is None or decoder_type == "rnnt":
             if decoding_cfg is None:
                 # Assume same decoding config as before
-                logging.info("No `decoding_cfg` passed when changing decoding strategy, using internal config")
+                logging.info(
+                    "No `decoding_cfg` passed when changing decoding strategy, using internal config"
+                )
                 decoding_cfg = self.cfg.decoding
 
             # Assert the decoding config with all hyper parameters
@@ -458,14 +544,24 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             decoding_cfg = OmegaConf.merge(decoding_cls, decoding_cfg)
             decoding_cfg = self.set_decoding_type_according_to_loss(decoding_cfg)
 
-            if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in self.cfg.decoder: #CTEMO
+            if (
+                self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+            ) and "multisoftmax" in self.cfg.decoder:  # CTEMO
                 self.decoding = RNNTBPEDecoding(
-                    decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes // len(self.tokenizer.tokenizers_dict.keys()),
+                    decoding_cfg=decoding_cfg,
+                    decoder=self.decoder,
+                    joint=self.joint,
+                    tokenizer=self.tokenizer,
+                    blank_id=self.ctc_decoder._num_classes
+                    // len(self.tokenizer.tokenizers_dict.keys()),
                     # lang_id=lang_id
                 )
             else:
                 self.decoding = RNNTBPEDecoding(
-                    decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+                    decoding_cfg=decoding_cfg,
+                    decoder=self.decoder,
+                    joint=self.joint,
+                    tokenizer=self.tokenizer,
                 )
 
             self.wer = WER(
@@ -478,26 +574,33 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
             # Setup fused Joint step
             if self.joint.fuse_loss_wer or (
-                self.decoding.joint_fused_batch_size is not None and self.decoding.joint_fused_batch_size > 0
+                self.decoding.joint_fused_batch_size is not None
+                and self.decoding.joint_fused_batch_size > 0
             ):
                 self.joint.set_loss(self.loss)
                 self.joint.set_wer(self.wer)
 
-            self.joint.temperature = decoding_cfg.get('temperature', 1.0)
+            self.joint.temperature = decoding_cfg.get("temperature", 1.0)
 
             # Update config
             with open_dict(self.cfg.decoding):
                 self.cfg.decoding = decoding_cfg
 
             self.cur_decoder = "rnnt"
-            logging.info(f"Changed decoding strategy of the RNNT decoder to \n{OmegaConf.to_yaml(self.cfg.decoding)}")
-        
-        elif decoder_type == 'ctc':
-            if not hasattr(self, 'ctc_decoding'):
-                raise ValueError("The model does not have the ctc_decoding module and does not support ctc decoding.")
+            logging.info(
+                f"Changed decoding strategy of the RNNT decoder to \n{OmegaConf.to_yaml(self.cfg.decoding)}"
+            )
+
+        elif decoder_type == "ctc":
+            if not hasattr(self, "ctc_decoding"):
+                raise ValueError(
+                    "The model does not have the ctc_decoding module and does not support ctc decoding."
+                )
             if decoding_cfg is None:
                 # Assume same decoding config as before
-                logging.info("No `decoding_cfg` passed when changing decoding strategy, using internal config")
+                logging.info(
+                    "No `decoding_cfg` passed when changing decoding strategy, using internal config"
+                )
                 decoding_cfg = self.cfg.aux_ctc.decoding
 
             # Assert the decoding config with all hyper parameters
@@ -505,10 +608,20 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             decoding_cls = OmegaConf.create(OmegaConf.to_container(decoding_cls))
             decoding_cfg = OmegaConf.merge(decoding_cls, decoding_cfg)
 
-            if (self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual") and "multisoftmax" in self.cfg.decoder: #CTEMO
-                self.ctc_decoding = CTCBPEDecoding(decoding_cfg=decoding_cfg, tokenizer=self.tokenizer, blank_id=self.ctc_decoder._num_classes//len(self.tokenizer.tokenizers_dict.keys()), lang_id=lang_id)
+            if (
+                self.tokenizer_type == "agg" or self.tokenizer_type == "multilingual"
+            ) and "multisoftmax" in self.cfg.decoder:  # CTEMO
+                self.ctc_decoding = CTCBPEDecoding(
+                    decoding_cfg=decoding_cfg,
+                    tokenizer=self.tokenizer,
+                    blank_id=self.ctc_decoder._num_classes
+                    // len(self.tokenizer.tokenizers_dict.keys()),
+                    lang_id=lang_id,
+                )
             else:
-                self.ctc_decoding = CTCBPEDecoding(decoding_cfg=decoding_cfg, tokenizer=self.tokenizer, lang_id=lang_id)
+                self.ctc_decoding = CTCBPEDecoding(
+                    decoding_cfg=decoding_cfg, tokenizer=self.tokenizer, lang_id=lang_id
+                )
 
             self.ctc_wer = WER(
                 decoding=self.ctc_decoding,
@@ -517,7 +630,7 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
                 dist_sync_on_step=True,
             )
 
-            self.ctc_decoder.temperature = decoding_cfg.get('temperature', 1.0)
+            self.ctc_decoder.temperature = decoding_cfg.get("temperature", 1.0)
 
             # Update config
             with open_dict(self.cfg.aux_ctc.decoding):
@@ -528,7 +641,9 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
                 f"Changed decoding strategy of the CTC decoder to \n{OmegaConf.to_yaml(self.cfg.aux_ctc.decoding)}"
             )
         else:
-            raise ValueError(f"decoder_type={decoder_type} is not supported. Supported values: [ctc,rnnt]")
+            raise ValueError(
+                f"decoder_type={decoder_type} is not supported. Supported values: [ctc,rnnt]"
+            )
 
     @classmethod
     def list_available_models(cls) -> List[PretrainedModelInfo]:
@@ -654,17 +769,18 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
 
         return results
 
+
 class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
         super().__init__(cfg=cfg, trainer=trainer)
-    
-    def set_cl_params(self,cl_params):
-        self.lda = cl_params['lamda']
-        self.alpha = cl_params['alpha']
-        self.fisher = cl_params['fisher']
-        self.old_params = cl_params['params']
+
+    def set_cl_params(self, cl_params):
+        self.lda = cl_params["lamda"]
+        self.alpha = cl_params["alpha"]
+        self.fisher = cl_params["fisher"]
+        self.old_params = cl_params["params"]
 
     def training_step(self, batch, batch_nb):
         # Reset access registry
@@ -674,23 +790,31 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        if "multisoftmax" not in self.cfg.decoder: #CTEMO
+        if "multisoftmax" not in self.cfg.decoder:  # CTEMO
             signal, signal_len, transcript, transcript_len = batch
             language_ids = None
         else:
-            signal, signal_len, transcript, transcript_len, sample_ids, language_ids = batch
+            signal, signal_len, transcript, transcript_len, sample_ids, language_ids = (
+                batch
+            )
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len)
+            encoded, encoded_len = self.forward(
+                processed_signal=signal, processed_signal_length=signal_len
+            )
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len)
+            encoded, encoded_len = self.forward(
+                input_signal=signal, input_signal_length=signal_len
+            )
         del signal
 
         # During training, loss must be computed, so decoder forward is necessary
-        decoder, target_length, states = self.decoder(targets=transcript, target_length=transcript_len)
+        decoder, target_length, states = self.decoder(
+            targets=transcript, target_length=transcript_len
+        )
 
-        if hasattr(self, '_trainer') and self._trainer is not None:
+        if hasattr(self, "_trainer") and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
             sample_id = self._trainer.global_step
         else:
@@ -705,17 +829,26 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
         # If fused Joint-Loss-WER is not used
         if not self.joint.fuse_loss_wer:
             # Compute full joint and loss
-            joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder, language_ids=language_ids) #CTEMO
+            joint = self.joint(
+                encoder_outputs=encoded,
+                decoder_outputs=decoder,
+                language_ids=language_ids,
+            )  # CTEMO
             loss_value = self.loss(
-                log_probs=joint, targets=transcript, input_lengths=encoded_len, target_lengths=target_length
+                log_probs=joint,
+                targets=transcript,
+                input_lengths=encoded_len,
+                target_lengths=target_length,
             )
 
             # Add auxiliary losses, if registered
             loss_value = self.add_auxiliary_losses(loss_value)
 
             tensorboard_logs = {
-                'learning_rate': self._optimizer.param_groups[0]['lr'],
-                'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
+                "learning_rate": self._optimizer.param_groups[0]["lr"],
+                "global_step": torch.tensor(
+                    self.trainer.global_step, dtype=torch.float32
+                ),
             }
 
             if compute_wer:
@@ -727,7 +860,7 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
                 )
                 _, scores, words = self.wer.compute()
                 self.wer.reset()
-                tensorboard_logs.update({'training_batch_wer': scores.float() / words})
+                tensorboard_logs.update({"training_batch_wer": scores.float() / words})
 
         else:  # If fused Joint-Loss-WER is used
             # Fused joint step
@@ -738,28 +871,37 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
                 transcripts=transcript,
                 transcript_lengths=transcript_len,
                 compute_wer=compute_wer,
-                language_ids=language_ids
+                language_ids=language_ids,
             )
 
             # Add auxiliary losses, if registered
             loss_value = self.add_auxiliary_losses(loss_value)
 
             tensorboard_logs = {
-                'learning_rate': self._optimizer.param_groups[0]['lr'],
-                'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
+                "learning_rate": self._optimizer.param_groups[0]["lr"],
+                "global_step": torch.tensor(
+                    self.trainer.global_step, dtype=torch.float32
+                ),
             }
 
             if compute_wer:
-                tensorboard_logs.update({'training_batch_wer': wer})
+                tensorboard_logs.update({"training_batch_wer": wer})
 
         if self.ctc_loss_weight > 0:
-            log_probs = self.ctc_decoder(encoder_output=encoded, language_ids=language_ids)
-            ctc_loss = self.ctc_loss(
-                log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
+            log_probs = self.ctc_decoder(
+                encoder_output=encoded, language_ids=language_ids
             )
-            tensorboard_logs['train_rnnt_loss'] = loss_value
-            tensorboard_logs['train_ctc_loss'] = ctc_loss
-            loss_value = (1 - self.ctc_loss_weight) * loss_value + self.ctc_loss_weight * ctc_loss
+            ctc_loss = self.ctc_loss(
+                log_probs=log_probs,
+                targets=transcript,
+                input_lengths=encoded_len,
+                target_lengths=transcript_len,
+            )
+            tensorboard_logs["train_rnnt_loss"] = loss_value
+            tensorboard_logs["train_ctc_loss"] = ctc_loss
+            loss_value = (
+                1 - self.ctc_loss_weight
+            ) * loss_value + self.ctc_loss_weight * ctc_loss
             if compute_wer:
                 if "multisoftmax" in self.cfg.decoder:
                     self.ctc_wer.update(
@@ -778,7 +920,7 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
                     )
                 ctc_wer, _, _ = self.ctc_wer.compute()
                 self.ctc_wer.reset()
-                tensorboard_logs.update({'training_batch_wer_ctc': ctc_wer})
+                tensorboard_logs.update({"training_batch_wer_ctc": ctc_wer})
 
         # note that we want to apply interctc independent of whether main ctc
         # loss is used or not (to allow rnnt + interctc training).
@@ -797,15 +939,14 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
                 (
                     self.fisher[name].to(self.device)
                     * (self.old_params[name].to(self.device) - param) ** 2
-                )
-                .sum()
+                ).sum()
                 # .to(self.device)
                 * self.alpha
                 * self.lda
             )
 
         tensorboard_logs.update(additional_logs)
-        tensorboard_logs['train_loss'] = loss_value
+        tensorboard_logs["train_loss"] = loss_value
         # Reset access registry
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
@@ -817,19 +958,20 @@ class EncDecHybridRNNTCTCBPEModelEWC(EncDecHybridRNNTCTCBPEModel):
         if self._optim_normalize_joint_txu:
             self._optim_normalize_txu = [encoded_len.max(), transcript_len.max()]
 
-        return {'loss': loss_value}
+        return {"loss": loss_value}
+
 
 class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
         super().__init__(cfg=cfg, trainer=trainer)
-    
-    def set_cl_params(self,cl_params):
-        self.lda = cl_params['lamda']
+
+    def set_cl_params(self, cl_params):
+        self.lda = cl_params["lamda"]
         # self.alpha = cl_params['alpha']
-        self.importance = cl_params['mas_importance']
-        self.old_params = cl_params['params']
+        self.importance = cl_params["mas_importance"]
+        self.old_params = cl_params["params"]
 
     def training_step(self, batch, batch_nb):
         # Reset access registry
@@ -839,23 +981,31 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        if "multisoftmax" not in self.cfg.decoder: #CTEMO
+        if "multisoftmax" not in self.cfg.decoder:  # CTEMO
             signal, signal_len, transcript, transcript_len = batch
             language_ids = None
         else:
-            signal, signal_len, transcript, transcript_len, sample_ids, language_ids = batch
+            signal, signal_len, transcript, transcript_len, sample_ids, language_ids = (
+                batch
+            )
 
         # forward() only performs encoder forward
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len)
+            encoded, encoded_len = self.forward(
+                processed_signal=signal, processed_signal_length=signal_len
+            )
         else:
-            encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len)
+            encoded, encoded_len = self.forward(
+                input_signal=signal, input_signal_length=signal_len
+            )
         del signal
 
         # During training, loss must be computed, so decoder forward is necessary
-        decoder, target_length, states = self.decoder(targets=transcript, target_length=transcript_len)
+        decoder, target_length, states = self.decoder(
+            targets=transcript, target_length=transcript_len
+        )
 
-        if hasattr(self, '_trainer') and self._trainer is not None:
+        if hasattr(self, "_trainer") and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
             sample_id = self._trainer.global_step
         else:
@@ -870,17 +1020,26 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
         # If fused Joint-Loss-WER is not used
         if not self.joint.fuse_loss_wer:
             # Compute full joint and loss
-            joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder, language_ids=language_ids) #CTEMO
+            joint = self.joint(
+                encoder_outputs=encoded,
+                decoder_outputs=decoder,
+                language_ids=language_ids,
+            )  # CTEMO
             loss_value = self.loss(
-                log_probs=joint, targets=transcript, input_lengths=encoded_len, target_lengths=target_length
+                log_probs=joint,
+                targets=transcript,
+                input_lengths=encoded_len,
+                target_lengths=target_length,
             )
 
             # Add auxiliary losses, if registered
             loss_value = self.add_auxiliary_losses(loss_value)
 
             tensorboard_logs = {
-                'learning_rate': self._optimizer.param_groups[0]['lr'],
-                'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
+                "learning_rate": self._optimizer.param_groups[0]["lr"],
+                "global_step": torch.tensor(
+                    self.trainer.global_step, dtype=torch.float32
+                ),
             }
 
             if compute_wer:
@@ -892,7 +1051,7 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
                 )
                 _, scores, words = self.wer.compute()
                 self.wer.reset()
-                tensorboard_logs.update({'training_batch_wer': scores.float() / words})
+                tensorboard_logs.update({"training_batch_wer": scores.float() / words})
 
         else:  # If fused Joint-Loss-WER is used
             # Fused joint step
@@ -903,28 +1062,37 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
                 transcripts=transcript,
                 transcript_lengths=transcript_len,
                 compute_wer=compute_wer,
-                language_ids=language_ids
+                language_ids=language_ids,
             )
 
             # Add auxiliary losses, if registered
             loss_value = self.add_auxiliary_losses(loss_value)
 
             tensorboard_logs = {
-                'learning_rate': self._optimizer.param_groups[0]['lr'],
-                'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
+                "learning_rate": self._optimizer.param_groups[0]["lr"],
+                "global_step": torch.tensor(
+                    self.trainer.global_step, dtype=torch.float32
+                ),
             }
 
             if compute_wer:
-                tensorboard_logs.update({'training_batch_wer': wer})
+                tensorboard_logs.update({"training_batch_wer": wer})
 
         if self.ctc_loss_weight > 0:
-            log_probs = self.ctc_decoder(encoder_output=encoded, language_ids=language_ids)
-            ctc_loss = self.ctc_loss(
-                log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
+            log_probs = self.ctc_decoder(
+                encoder_output=encoded, language_ids=language_ids
             )
-            tensorboard_logs['train_rnnt_loss'] = loss_value
-            tensorboard_logs['train_ctc_loss'] = ctc_loss
-            loss_value = (1 - self.ctc_loss_weight) * loss_value + self.ctc_loss_weight * ctc_loss
+            ctc_loss = self.ctc_loss(
+                log_probs=log_probs,
+                targets=transcript,
+                input_lengths=encoded_len,
+                target_lengths=transcript_len,
+            )
+            tensorboard_logs["train_rnnt_loss"] = loss_value
+            tensorboard_logs["train_ctc_loss"] = ctc_loss
+            loss_value = (
+                1 - self.ctc_loss_weight
+            ) * loss_value + self.ctc_loss_weight * ctc_loss
             if compute_wer:
                 if "multisoftmax" in self.cfg.decoder:
                     self.ctc_wer.update(
@@ -943,7 +1111,7 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
                     )
                 ctc_wer, _, _ = self.ctc_wer.compute()
                 self.ctc_wer.reset()
-                tensorboard_logs.update({'training_batch_wer_ctc': ctc_wer})
+                tensorboard_logs.update({"training_batch_wer_ctc": ctc_wer})
 
         # note that we want to apply interctc independent of whether main ctc
         # loss is used or not (to allow rnnt + interctc training).
@@ -956,20 +1124,23 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
 
         # EWC related changes
         for name, param in self.named_parameters():
-            if not param.requires_grad or param.grad is None or name not in self.importance:
+            if (
+                not param.requires_grad
+                or param.grad is None
+                or name not in self.importance
+            ):
                 continue
             loss_value += (
                 (
                     self.importance[name].to(self.device)
                     * (self.old_params[name].to(self.device) - param) ** 2
-                )
-                .sum()
+                ).sum()
                 # .to(self.device)
                 * self.lda
             )
 
         tensorboard_logs.update(additional_logs)
-        tensorboard_logs['train_loss'] = loss_value
+        tensorboard_logs["train_loss"] = loss_value
         # Reset access registry
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
@@ -981,4 +1152,4 @@ class EncDecHybridRNNTCTCBPEModelMAS(EncDecHybridRNNTCTCBPEModel):
         if self._optim_normalize_joint_txu:
             self._optim_normalize_txu = [encoded_len.max(), transcript_len.max()]
 
-        return {'loss': loss_value}
+        return {"loss": loss_value}

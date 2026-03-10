@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from nemo.collections.asr.parts.utils import rnnt_utils
+from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis as _RNNTHyp
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.core.classes import Typing, typecheck
 from nemo.core.neural_types import HypothesisType, LengthsType, LogprobsType, NeuralType
@@ -105,12 +106,6 @@ class AbstractBeamCTCInfer(Typing):
         # Internal variable, used to prevent double reduction of consecutive tokens (ctc collapse)
         self.override_fold_consecutive_value = None
 
-        # CTEMO: language parameters
-        self.num_langs = 1
-        self.vocab_size_per_lang = None
-        self.lang_to_idx = {}
-        # CTEMO end
-
     def set_vocabulary(self, vocab: List[str]):
         """
         Set the vocabulary of the decoding framework.
@@ -122,20 +117,6 @@ class AbstractBeamCTCInfer(Typing):
         self.vocab = vocab
         self.vocab_index_map = {v: i for i, v in enumerate(vocab)}
         self.index_vocab_map = {i: v for i, v in enumerate(vocab)}
-
-    # CTEMO: new method to set language parameters
-    def set_language_params(self, num_langs: int, vocab_size_per_lang: int, tokenizer):
-        self.num_langs = num_langs
-        self.vocab_size_per_lang = vocab_size_per_lang
-        # Build mapping from language string to index
-        if hasattr(tokenizer, "tokenizers_dict"):
-            self.lang_to_idx = {
-                lang: i for i, lang in enumerate(tokenizer.tokenizers_dict.keys())
-            }
-        # blank_id for per-language logits is vocab_size_per_lang (since within a language block)
-        self.blank_id_per_lang = vocab_size_per_lang
-
-    # CTEMO end
 
     def set_decoding_type(self, decoding_type: str):
         """
@@ -169,7 +150,6 @@ class AbstractBeamCTCInfer(Typing):
         self,
         decoder_output: torch.Tensor,
         decoder_lengths: torch.Tensor,
-        lang_ids: Optional[torch.Tensor] = None,  # CTEMO
     ) -> Tuple[List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]]:
         """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
         Output token is generated auto-repressively.
@@ -217,7 +197,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         kenlm_path: str = None,
         flashlight_cfg: Optional["FlashlightConfig"] = None,
         pyctcdecode_cfg: Optional["PyCTCDecodeConfig"] = None,
-        lang_id: str = None,  # CTEMO
     ):
         super().__init__(blank_id=blank_id, beam_size=beam_size)
 
@@ -225,7 +204,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         self.return_best_hypothesis = return_best_hypothesis
         self.preserve_alignments = preserve_alignments
         self.compute_timestamps = compute_timestamps
-        self.lang_id = lang_id  # CTEMO
 
         if self.compute_timestamps:
             raise ValueError(
@@ -265,7 +243,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         self.flashlight_cfg = flashlight_cfg
 
         # Default beam search scorer functions
-        self.default_beam_scorer = None  # CTEMO: will become dict per language
+        self.default_beam_scorer = None
         self.pyctcdecode_beam_scorer = None
         self.flashlight_beam_scorer = None
         self.token_offset = 0
@@ -275,7 +253,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         self,
         decoder_output: torch.Tensor,
         decoder_lengths: torch.Tensor,
-        lang_ids: Optional[torch.Tensor] = None,  # CTEMO
     ) -> Tuple[List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]]:
         """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
         Output token is generated auto-repressively.
@@ -298,26 +275,6 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 "Please set the decoding type with `set_decoding_type()` before calling this function."
             )
 
-        # CTEMO: slice logits per language if needed
-        if self.num_langs > 1 and lang_ids is not None:
-            batch_size = decoder_output.shape[0]
-            sliced_list = []
-            sliced_lengths = []
-            for i in range(batch_size):
-                lang = int(lang_ids[i].cpu())  # assume lang_ids are integer indices
-                start = lang * (self.vocab_size_per_lang + 1)
-                end = (lang + 1) * (self.vocab_size_per_lang + 1)
-                sliced = decoder_output[i, :, start:end]  # [T, V+1]
-                sliced_list.append(sliced.unsqueeze(0))
-                if decoder_lengths is not None:
-                    sliced_lengths.append(decoder_lengths[i].unsqueeze(0))
-            decoder_output = torch.cat(sliced_list, dim=0)
-            if decoder_lengths is not None:
-                decoder_lengths = torch.cat(sliced_lengths, dim=0)
-            # For the decoders, blank_id should be vocab_size_per_lang
-            # We'll handle this inside each search algorithm
-        # CTEMO end
-
         with torch.no_grad(), torch.inference_mode():
             # Process each sequence independently
             prediction_tensor = decoder_output
@@ -330,9 +287,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
             # determine type of input - logprobs or labels
             out_len = decoder_lengths if decoder_lengths is not None else None
-            hypotheses = self.search_algorithm(
-                prediction_tensor, out_len, lang_ids
-            )  # CTEMO: pass lang_ids
+            hypotheses = self.search_algorithm(prediction_tensor, out_len)
 
             # Pack results into Hypotheses
             packed_result = pack_hypotheses(hypotheses, decoder_lengths)
@@ -341,16 +296,24 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             if self.return_best_hypothesis and isinstance(
                 packed_result[0], rnnt_utils.NBestHypotheses
             ):
-                packed_result = [res.n_best_hypotheses[0] for res in packed_result]  # type: Hypothesis
+                safe_result = []
+                for res in packed_result:
+                    if (
+                        hasattr(res, "n_best_hypotheses")
+                        and len(res.n_best_hypotheses) > 0
+                    ):
+                        safe_result.append(res.n_best_hypotheses[0])
+                    else:
+                        dummy = _RNNTHyp(score=-1.0, y_sequence=[], dec_state=None)
+                        dummy.text = ""
+                        safe_result.append(dummy)
+                packed_result = safe_result
 
         return (packed_result,)
 
     @torch.no_grad()
     def default_beam_search(
-        self,
-        x: torch.Tensor,
-        out_len: torch.Tensor,
-        lang_ids: Optional[torch.Tensor] = None,  # CTEMO
+        self, x: torch.Tensor, out_len: torch.Tensor
     ) -> List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]:
         """
         Open Seq2Seq Beam Search Algorithm (DeepSpeed)
@@ -368,75 +331,51 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 f"Beam Search with strategy `{self.search_type}` does not support time stamp calculation!"
             )
 
-        # CTEMO: per‑language scorers
         if self.default_beam_scorer is None:
-            self.default_beam_scorer = {}  # dict: lang_id -> scorer
+            # Check for filepath
+            if self.kenlm_path is None or not os.path.exists(self.kenlm_path):
+                raise FileNotFoundError(
+                    f"KenLM binary file not found at : {self.kenlm_path}. "
+                    f"Please set a valid path in the decoding config."
+                )
 
-        # We need to process each sample separately because languages may differ
-        x = x.to("cpu")
-        nbest_hypotheses = []
-        for sample_id in range(len(x)):
-            lang_id = None
-            if lang_ids is not None:
-                lang_id = int(lang_ids[sample_id].cpu())
-                # Get per‑language vocabulary if not already done
-                if lang_id not in self.default_beam_scorer:
-                    # Get vocabulary for this language
-                    if self.decoding_type == "subword" and self.tokenizer is not None:
-                        # Get tokenizer for this language
-                        if hasattr(self.tokenizer, "tokenizers_dict"):
-                            lang_str = list(self.tokenizer.tokenizers_dict.keys())[
-                                lang_id
-                            ]
-                            tokenizer_lang = self.tokenizer.tokenizers_dict[lang_str]
-                            vocab = list(tokenizer_lang.tokenizer.get_vocab().keys())
-                        else:
-                            vocab = self.vocab  # fallback
-                    else:
-                        vocab = self.vocab
-                    # Build scorer
-                    from nemo.collections.asr.modules.beam_search_decoder import (
-                        BeamSearchDecoderWithLM,
-                    )
-
-                    self.default_beam_scorer[lang_id] = BeamSearchDecoderWithLM(
-                        vocab=vocab,
-                        lm_path=self.kenlm_path,
-                        beam_width=self.beam_size,
-                        alpha=self.beam_alpha,
-                        beta=self.beam_beta,
-                        num_cpus=max(1, os.cpu_count()),
-                        input_tensor=False,
-                    )
-                scorer = self.default_beam_scorer[lang_id]
+            # perform token offset for subword models
+            if self.decoding_type == "subword":
+                vocab = [chr(idx + self.token_offset) for idx in range(len(self.vocab))]
             else:
-                # Single language, use global vocab
-                if self.default_beam_scorer.get(0) is None:
-                    if self.decoding_type == "subword":
-                        # For subword, we need the vocabulary with token offset if not sliced
-                        # But here we assume logits are already sliced, so vocab is the per‑language vocab
-                        vocab = self.vocab
-                    else:
-                        vocab = self.vocab
-                    from nemo.collections.asr.modules.beam_search_decoder import (
-                        BeamSearchDecoderWithLM,
-                    )
+                # char models
+                vocab = self.vocab
 
-                    self.default_beam_scorer[0] = BeamSearchDecoderWithLM(
-                        vocab=vocab,
-                        lm_path=self.kenlm_path,
-                        beam_width=self.beam_size,
-                        alpha=self.beam_alpha,
-                        beta=self.beam_beta,
-                        num_cpus=max(1, os.cpu_count()),
-                        input_tensor=False,
-                    )
-                scorer = self.default_beam_scorer[0]
+            # Must import at runtime to avoid circular dependency due to module level import.
+            from nemo.collections.asr.modules.beam_search_decoder import (
+                BeamSearchDecoderWithLM,
+            )
 
-            # Prepare data for this sample
-            data = [x[sample_id, : out_len[sample_id], :].softmax(dim=-1)]
-            beams = scorer.forward(log_probs=data, log_probs_length=None)[0]
+            self.default_beam_scorer = BeamSearchDecoderWithLM(
+                vocab=vocab,
+                lm_path=self.kenlm_path,
+                beam_width=self.beam_size,
+                alpha=self.beam_alpha,
+                beta=self.beam_beta,
+                num_cpus=max(1, os.cpu_count()),
+                input_tensor=False,
+            )
 
+        x = x.to("cpu")
+
+        with typecheck.disable_checks():
+            data = [
+                x[sample_id, : out_len[sample_id], :].softmax(dim=-1)
+                for sample_id in range(len(x))
+            ]
+            beams_batch = self.default_beam_scorer.forward(
+                log_probs=data, log_probs_length=None
+            )
+
+        # For each sample in the batch
+        nbest_hypotheses = []
+        for beams_idx, beams in enumerate(beams_batch):
+            # For each beam candidate / hypothesis in each sample
             hypotheses = []
             for candidate_idx, candidate in enumerate(beams):
                 hypothesis = rnnt_utils.Hypothesis(
@@ -447,40 +386,31 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                     last_token=None,
                 )
 
-                # For subword encoding, NeMo may use token offset; but we have sliced logits,
-                # so the IDs are already in the per‑language space.
-                if self.decoding_type == "subword" and lang_id is not None:
-                    # IDs from scorer are indices into the per‑language vocab; use them directly
-                    # If the scorer returns characters, we need to map back to token ids.
-                    # This depends on the scorer's implementation; assume it returns token indices.
-                    # If it returns characters, we need a vocabulary index map.
-                    # We'll use the global index map if available.
-                    if self.vocab_index_map is not None:
-                        pred_token_ids = [
-                            self.vocab_index_map.get(c, 0) for c in candidate[1]
-                        ]
-                    else:
-                        pred_token_ids = [
-                            ord(c) - self.token_offset for c in candidate[1]
-                        ]
+                # For subword encoding, NeMo will double encode the subword (multiple tokens) into a
+                # singular unicode id. In doing so, we preserve the semantic of the unicode token, and
+                # compress the size of the final KenLM ARPA / Binary file.
+                # In order to do double encoding, we shift the subword by some token offset.
+                # This step is ignored for character based models.
+                if self.decoding_type == "subword":
+                    pred_token_ids = [ord(c) - self.token_offset for c in candidate[1]]
                 else:
-                    if self.vocab_index_map is not None:
-                        pred_token_ids = [
-                            self.vocab_index_map.get(c, 0) for c in candidate[1]
-                        ]
-                    else:
-                        pred_token_ids = [
-                            ord(c) - self.token_offset for c in candidate[1]
-                        ]
+                    # Char models
+                    pred_token_ids = [self.vocab_index_map[c] for c in candidate[1]]
 
+                # We preserve the token ids and the score for this hypothesis
                 hypothesis.y_sequence = pred_token_ids
                 hypothesis.score = candidate[0]
 
+                # If alignment must be preserved, we preserve a view of the output logprobs.
+                # Note this view is shared amongst all beams within the sample, be sure to clone it if you
+                # require specific processing for each sample in the beam.
+                # This is done to preserve memory.
                 if self.preserve_alignments:
-                    hypothesis.alignments = x[sample_id][: out_len[sample_id]]
+                    hypothesis.alignments = x[beams_idx][: out_len[beams_idx]]
 
                 hypotheses.append(hypothesis)
 
+            # Wrap the result in NBestHypothesis.
             hypotheses = rnnt_utils.NBestHypotheses(hypotheses)
             nbest_hypotheses.append(hypotheses)
 
@@ -488,10 +418,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
     @torch.no_grad()
     def _pyctcdecode_beam_search(
-        self,
-        x: torch.Tensor,
-        out_len: torch.Tensor,
-        lang_ids: Optional[torch.Tensor] = None,  # CTEMO
+        self, x: torch.Tensor, out_len: torch.Tensor
     ) -> List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]:
         """
         PyCTCDecode Beam Search Algorithm. Should support Char and Subword models.
@@ -517,63 +444,37 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 "pip install --upgrade pyctcdecode"
             )
 
-        # CTEMO: per‑language scorers
         if self.pyctcdecode_beam_scorer is None:
-            self.pyctcdecode_beam_scorer = {}  # dict: lang_id -> scorer
+            self.pyctcdecode_beam_scorer = pyctcdecode.build_ctcdecoder(
+                labels=self.vocab,
+                kenlm_model_path=self.kenlm_path,
+                alpha=self.beam_alpha,
+                beta=self.beam_beta,
+            )  # type: pyctcdecode.BeamSearchDecoderCTC
 
         x = x.to("cpu").numpy()
+
+        with typecheck.disable_checks():
+            beams_batch = []
+            for sample_id in range(len(x)):
+                logprobs = x[sample_id, : out_len[sample_id], :]
+                result = self.pyctcdecode_beam_scorer.decode_beams(
+                    logprobs,
+                    beam_width=self.beam_size,
+                    beam_prune_logp=self.pyctcdecode_cfg.beam_prune_logp,
+                    token_min_logp=self.pyctcdecode_cfg.token_min_logp,
+                    prune_history=self.pyctcdecode_cfg.prune_history,
+                    hotwords=self.pyctcdecode_cfg.hotwords,
+                    hotword_weight=self.pyctcdecode_cfg.hotword_weight,
+                    lm_start_state=None,
+                )  # Output format: text, last_lm_state, text_frames, logit_score, lm_score
+                beams_batch.append(result)
+
         nbest_hypotheses = []
-        for sample_id in range(len(x)):
-            logprobs = x[sample_id, : out_len[sample_id], :]
-            lang_id = None
-            if lang_ids is not None:
-                lang_id = int(lang_ids[sample_id].cpu())
-                if lang_id not in self.pyctcdecode_beam_scorer:
-                    # Get per‑language vocabulary
-                    if self.decoding_type == "subword" and self.tokenizer is not None:
-                        if hasattr(self.tokenizer, "tokenizers_dict"):
-                            lang_str = list(self.tokenizer.tokenizers_dict.keys())[
-                                lang_id
-                            ]
-                            tokenizer_lang = self.tokenizer.tokenizers_dict[lang_str]
-                            vocab = list(tokenizer_lang.tokenizer.get_vocab().keys())
-                        else:
-                            vocab = self.vocab
-                    else:
-                        vocab = self.vocab
-                    self.pyctcdecode_beam_scorer[lang_id] = (
-                        pyctcdecode.build_ctcdecoder(
-                            labels=vocab,
-                            kenlm_model_path=self.kenlm_path,
-                            alpha=self.beam_alpha,
-                            beta=self.beam_beta,
-                        )
-                    )
-                scorer = self.pyctcdecode_beam_scorer[lang_id]
-            else:
-                # Single language, use global scorer
-                if self.pyctcdecode_beam_scorer.get(0) is None:
-                    self.pyctcdecode_beam_scorer[0] = pyctcdecode.build_ctcdecoder(
-                        labels=self.vocab,
-                        kenlm_model_path=self.kenlm_path,
-                        alpha=self.beam_alpha,
-                        beta=self.beam_beta,
-                    )
-                scorer = self.pyctcdecode_beam_scorer[0]
-
-            result = scorer.decode_beams(
-                logprobs,
-                beam_width=self.beam_size,
-                beam_prune_logp=self.pyctcdecode_cfg.beam_prune_logp,
-                token_min_logp=self.pyctcdecode_cfg.token_min_logp,
-                prune_history=self.pyctcdecode_cfg.prune_history,
-                hotwords=self.pyctcdecode_cfg.hotwords,
-                hotword_weight=self.pyctcdecode_cfg.hotword_weight,
-                lm_start_state=None,
-            )  # Output format: text, last_lm_state, text_frames, logit_score, lm_score
-
+        for beams_idx, beams in enumerate(beams_batch):
             hypotheses = []
-            for candidate_idx, candidate in enumerate(result):
+            for candidate_idx, candidate in enumerate(beams):
+                # Candidate = (text, last_lm_state, text_frames, logit_score, lm_score)
                 hypothesis = rnnt_utils.Hypothesis(
                     score=0.0,
                     y_sequence=[],
@@ -582,36 +483,33 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                     last_token=None,
                 )
 
+                # TODO: Requires token ids to be returned rather than text.
                 if self.decoding_type == "subword":
                     if self.tokenizer is None:
                         raise ValueError(
                             "Tokenizer must be provided for subword decoding. Use set_tokenizer()."
                         )
-                    # Use appropriate tokenizer for language
-                    if lang_ids is not None and hasattr(
-                        self.tokenizer, "tokenizers_dict"
-                    ):
-                        lang_str = list(self.tokenizer.tokenizers_dict.keys())[lang_id]
-                        tokenizer_lang = self.tokenizer.tokenizers_dict[lang_str]
-                        pred_token_ids = tokenizer_lang.text_to_ids(candidate[0])
-                    else:
-                        pred_token_ids = self.tokenizer.text_to_ids(candidate[0])
+
+                    pred_token_ids = self.tokenizer.text_to_ids(candidate[0])
                 else:
                     if self.vocab is None:
                         raise ValueError(
                             "Vocab must be provided for character decoding. Use set_vocab()."
                         )
+
                     chars = list(candidate[0])
                     pred_token_ids = [self.vocab_index_map[c] for c in chars]
 
                 hypothesis.y_sequence = pred_token_ids
-                hypothesis.text = candidate[0]
-                hypothesis.score = candidate[4]
-                hypothesis.timestep = candidate[2]
+                hypothesis.text = candidate[0]  # text
+                hypothesis.score = candidate[4]  # score
+
+                # Inject word level timestamps
+                hypothesis.timestep = candidate[2]  # text_frames
 
                 if self.preserve_alignments:
                     hypothesis.alignments = torch.from_numpy(
-                        x[sample_id][: out_len[sample_id]]
+                        x[beams_idx][: out_len[beams_idx]]
                     )
 
                 hypotheses.append(hypothesis)
@@ -623,10 +521,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
     @torch.no_grad()
     def flashlight_beam_search(
-        self,
-        x: torch.Tensor,
-        out_len: torch.Tensor,
-        lang_ids: Optional[torch.Tensor] = None,  # CTEMO
+        self, x: torch.Tensor, out_len: torch.Tensor
     ) -> List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]:
         """
         Flashlight Beam Search Algorithm. Should support Char and Subword models.
@@ -645,83 +540,51 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             )
 
         if self.flashlight_beam_scorer is None:
-            # CTEMO: per‑language scorers
-            self.flashlight_beam_scorer = {}
+            # Check for filepath
+            if self.kenlm_path is None or not os.path.exists(self.kenlm_path):
+                raise FileNotFoundError(
+                    f"KenLM binary file not found at : {self.kenlm_path}. "
+                    f"Please set a valid path in the decoding config."
+                )
+
+            # perform token offset for subword models
+            # if self.decoding_type == 'subword':
+            #    vocab = [chr(idx + self.token_offset) for idx in range(len(self.vocab))]
+            # else:
+            #    # char models
+            #    vocab = self.vocab
+
+            # Must import at runtime to avoid circular dependency due to module level import.
+            from nemo.collections.asr.modules.flashlight_decoder import (
+                FlashLightKenLMBeamSearchDecoder,
+            )
+
+            self.flashlight_beam_scorer = FlashLightKenLMBeamSearchDecoder(
+                lm_path=self.kenlm_path,
+                vocabulary=self.vocab,
+                tokenizer=self.tokenizer,
+                lexicon_path=self.flashlight_cfg.lexicon_path,
+                boost_path=self.flashlight_cfg.boost_path,
+                beam_size=self.beam_size,
+                beam_size_token=self.flashlight_cfg.beam_size_token,
+                beam_threshold=self.flashlight_cfg.beam_threshold,
+                lm_weight=self.beam_alpha,
+                word_score=self.beam_beta,
+                unk_weight=self.flashlight_cfg.unk_weight,
+                sil_weight=self.flashlight_cfg.sil_weight,
+            )
 
         x = x.to("cpu")
+
+        with typecheck.disable_checks():
+            beams_batch = self.flashlight_beam_scorer.forward(log_probs=x)
+
+        # For each sample in the batch
         nbest_hypotheses = []
-        for sample_id in range(len(x)):
-            lang_id = None
-            if lang_ids is not None:
-                lang_id = int(lang_ids[sample_id].cpu())
-                if lang_id not in self.flashlight_beam_scorer:
-                    # Build scorer for this language
-                    from nemo.collections.asr.modules.flashlight_decoder import (
-                        FlashLightKenLMBeamSearchDecoder,
-                    )
-
-                    # Get per‑language vocabulary
-                    if self.decoding_type == "subword" and self.tokenizer is not None:
-                        if hasattr(self.tokenizer, "tokenizers_dict"):
-                            lang_str = list(self.tokenizer.tokenizers_dict.keys())[
-                                lang_id
-                            ]
-                            tokenizer_lang = self.tokenizer.tokenizers_dict[lang_str]
-                            vocab = list(tokenizer_lang.tokenizer.get_vocab().keys())
-                        else:
-                            vocab = self.vocab
-                    else:
-                        vocab = self.vocab
-                    self.flashlight_beam_scorer[lang_id] = (
-                        FlashLightKenLMBeamSearchDecoder(
-                            lm_path=self.kenlm_path,
-                            vocabulary=vocab,
-                            lang_id=lang_id,  # might need to convert to string
-                            tokenizer=self.tokenizer,
-                            lexicon_path=self.flashlight_cfg.lexicon_path,
-                            boost_path=self.flashlight_cfg.boost_path,
-                            beam_size=self.beam_size,
-                            beam_size_token=self.flashlight_cfg.beam_size_token,
-                            beam_threshold=self.flashlight_cfg.beam_threshold,
-                            lm_weight=self.beam_alpha,
-                            word_score=self.beam_beta,
-                            unk_weight=self.flashlight_cfg.unk_weight,
-                            sil_weight=self.flashlight_cfg.sil_weight,
-                        )
-                    )
-                scorer = self.flashlight_beam_scorer[lang_id]
-            else:
-                if self.flashlight_beam_scorer.get(0) is None:
-                    from nemo.collections.asr.modules.flashlight_decoder import (
-                        FlashLightKenLMBeamSearchDecoder,
-                    )
-
-                    self.flashlight_beam_scorer[0] = FlashLightKenLMBeamSearchDecoder(
-                        lm_path=self.kenlm_path,
-                        vocabulary=self.vocab,
-                        lang_id=None,
-                        tokenizer=self.tokenizer,
-                        lexicon_path=self.flashlight_cfg.lexicon_path,
-                        boost_path=self.flashlight_cfg.boost_path,
-                        beam_size=self.beam_size,
-                        beam_size_token=self.flashlight_cfg.beam_size_token,
-                        beam_threshold=self.flashlight_cfg.beam_threshold,
-                        lm_weight=self.beam_alpha,
-                        word_score=self.beam_beta,
-                        unk_weight=self.flashlight_cfg.unk_weight,
-                        sil_weight=self.flashlight_cfg.sil_weight,
-                    )
-                scorer = self.flashlight_beam_scorer[0]
-
-            # Prepare data for this sample
-            x_sample = x[
-                sample_id : sample_id + 1, : out_len[sample_id], :
-            ]  # keep batch dimension
-            beams_batch = scorer.forward(log_probs=x_sample)  # expects batch
-
-            # For each beam candidate in this sample
+        for beams_idx, beams in enumerate(beams_batch):
+            # For each beam candidate / hypothesis in each sample
             hypotheses = []
-            for candidate in beams_batch[0]:  # first (and only) batch element
+            for candidate_idx, candidate in enumerate(beams):
                 hypothesis = rnnt_utils.Hypothesis(
                     score=0.0,
                     y_sequence=[],
@@ -730,15 +593,20 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                     last_token=None,
                 )
 
-                # Token IDs are already in the per‑language space
+                # We preserve the token ids and the score for this hypothesis
                 hypothesis.y_sequence = candidate["tokens"].tolist()
                 hypothesis.score = candidate["score"]
 
+                # If alignment must be preserved, we preserve a view of the output logprobs.
+                # Note this view is shared amongst all beams within the sample, be sure to clone it if you
+                # require specific processing for each sample in the beam.
+                # This is done to preserve memory.
                 if self.preserve_alignments:
-                    hypothesis.alignments = x[sample_id][: out_len[sample_id]]
+                    hypothesis.alignments = x[beams_idx][: out_len[beams_idx]]
 
                 hypotheses.append(hypothesis)
 
+            # Wrap the result in NBestHypothesis.
             hypotheses = rnnt_utils.NBestHypotheses(hypotheses)
             nbest_hypotheses.append(hypotheses)
 
