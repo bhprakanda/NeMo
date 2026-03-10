@@ -1,4 +1,4 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,214 +11,88 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# CTEMO
-from typing import Dict, List, Union
+#
+# Use this file to create a lexicon file for Flashlight decoding from an existing KenLM arpa file
+# A lexicon file is required for Flashlight decoding in most cases, as it acts as a map from the words
+# in you arpa file to the representation used by your ASR AM.
+# For more details, see: https://github.com/flashlight/flashlight/tree/main/flashlight/app/asr#data-preparation
+#
+# Usage: python create_lexicon_from_arpa.py --arpa /path/to/english.arpa --model /path/to/model.nemo --lower
+#
+#
 
-import numpy as np
 
-from nemo.collections.common.tokenizers.aggregate_tokenizer import DummyTokenizer
-from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
+import argparse
+import os
+import re
+
 from nemo.utils import logging
 
-__all__ = ["MultilingualTokenizer"]
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Utility script for generating lexicon file from a KenLM arpa file"
+    )
+    parser.add_argument("--arpa", required=True, help="path to your arpa file")
+    parser.add_argument(
+        "--dst", help="directory to store generated lexicon", default=None
+    )
+    parser.add_argument(
+        "--lower", action="store_true", help="Whether to lowercase the arpa vocab"
+    )
+    parser.add_argument(
+        "--model", default=None, help="path to Nemo model for its tokeniser"
+    )
 
+    args = parser.parse_args()
 
-class MultilingualTokenizer(TokenizerSpec):
-    """
-    MultilingualTokenizer, allowing one to combine multiple regular monolongual tokenizers into one tokenizer.
-    The intuition is that we can use existing tokenizers "as is", without retraining, and associate each tokenizer with a language id
-    during text processing (language id will be used to route the incoming text sample to the right tokenizer)
-    as well as a token id range for detokenization (e.g. [0..127] for tokenizer A, [128..255] for tokenizer B) so
-    that the orignal text could be reconstructed. Note that we assume that the incoming dict of langs / tokenizers
-    is ordered, e.g. the first tokenizer will be assigned a lower interval of token ids
-        Args:
-        tokenizers: dict of tokenizers, keys are lang ids, values are actual tokenizers
-    """
+    if not os.path.exists(args.arpa):
+        logging.critical(f"ARPA file [ {args.arpa} ] not detected on disk, aborting!")
+        exit(255)
 
-    def __init__(self, tokenizers: Dict):
-        self.tokenizers_dict = tokenizers
-        self.vocabulary = []
+    if args.dst is not None:
+        save_path = args.dst
+    else:
+        save_path = os.path.dirname(args.arpa)
+    os.makedirs(save_path, exist_ok=True)
 
-        # the tokenizers should produce non-overlapping, ordered token ids
-        # keys are language ids
-        self.token_id_offset = {}
+    tokenizer = None
+    if args.model is not None:
+        from nemo.collections.asr.models import ASRModel
 
-        # keys are tokenizer numbers
-        self.token_id_offset_by_tokenizer_num = {}
-        offset = 0
-        i = 0
-        for lang, tokenizer in self.tokenizers_dict.items():
-            self.token_id_offset[lang] = offset
-            self.token_id_offset_by_tokenizer_num[i] = offset
-            offset += len(tokenizer.vocab)
-            i += 1
+        model = ASRModel.restore_from(restore_path=args.model, map_location="cpu")
+        if hasattr(model, "tokenizer"):
+            tokenizer = model.tokenizer
+        else:
+            logging.warning("Supplied Nemo model does not contain a tokenizer")
 
-        for tokenizer in self.tokenizers_dict.values():
-            self.vocabulary.extend(tokenizer.vocab)
+    lex_file = os.path.join(
+        save_path, os.path.splitext(os.path.basename(args.arpa))[0] + ".lexicon"
+    )
 
-        self.vocab_size = len(self.vocabulary)
-        logging.info(f"Aggregate vocab size: {self.vocab_size}")
+    logging.info(f"Writing Lexicon file to: {lex_file}...")
+    with open(lex_file, "w", encoding="utf_8", newline="\n") as f:
+        with open(args.arpa, "r", encoding="utf_8") as arpa:
+            for line in arpa:
+                # verify if the line corresponds to unigram
+                if not re.match(r"[-]*[0-9\.]+\t\S+\t*[-]*[0-9\.]*$", line):
+                    continue
+                word = line.split("\t")[1]
+                word = word.strip().lower() if args.lower else word.strip()
+                if (
+                    word == "<UNK>"
+                    or word == "<unk>"
+                    or word == "<s>"
+                    or word == "</s>"
+                ):
+                    continue
 
-        # for compatibility purposes only -- right now only the get_vocab method
-        # is supported, returning the joint vocab across all tokenizers
-        self.tokenizer = DummyTokenizer(self.vocabulary)
-
-        # lookup tables to speed up token to text operations
-        # if there are two tokenizers, [0,1], ['en', 'es'], each with 128 tokens, the aggregate tokenizer
-        # token range will be [0,255]. The below method provides three look up tables:
-        # one, to convert the incoming token id -- e.g. 200 into its real id (200-127 = 73)
-        # second, to compute the tokenizer id that should process that token (1)
-        # third, the compute the lang id for that token ('es')
-        offset_token_ids_by_token_id, tokenizers_by_token_id, langs_by_token_id = (
-            self._calculate_offsets()
-        )
-
-        self.offset_token_ids_by_token_id = offset_token_ids_by_token_id
-        self.tokenizers_by_token_id = tokenizers_by_token_id
-        self.langs_by_token_id = langs_by_token_id
-
-    def _calculate_offsets(self):
-        offsets = {}
-        tokenizers = {}
-        langs = {}
-        cur_num = 0
-        tot = len(self.tokenizers_dict)
-        for id in range(len(self.vocabulary)):
-            off_id = id - list(self.token_id_offset.values())[cur_num]
-            if cur_num + 1 < tot:
-                if id >= list(self.token_id_offset.values())[cur_num + 1]:
-                    cur_num += 1
-                    off_id = id - list(self.token_id_offset.values())[cur_num]
-            offsets[id] = off_id
-            tokenizers[id] = list(self.tokenizers_dict.values())[cur_num]
-            langs[id] = list(self.tokenizers_dict.keys())[cur_num]
-
-        return offsets, tokenizers, langs
-
-    def text_to_tokens(self, text, lang_id):
-        tokenizer = self.tokenizers_dict[lang_id]
-        return tokenizer.text_to_tokens(text)
-
-    def text_to_ids(self, text, lang_id):
-        tokenizer = self.tokenizers_dict[lang_id]
-        token_ids = tokenizer.text_to_ids(text)
-        # token_ids[:] = [t + self.token_id_offset[lang_id] for t in token_ids]
-
-        return token_ids
-
-    def tokens_to_text(self, tokens, lang_id):
-        if isinstance(tokens, np.ndarray):
-            tokens = tokens.tolist()
-
-        tokenizer = self.tokenizers_dict[lang_id]
-        return tokenizer.decode_pieces(tokens)
-
-    def ids_to_text(self, ids, lang):
-        if isinstance(ids, np.ndarray):
-            ids = ids.tolist()
-        tokenizer = self.tokenizers_dict[lang]
-        offset = self.token_id_offset[lang]
-        vocab_size = len(tokenizer.vocab)
-        tokens = []
-        for id in ids:
-            if 0 <= id < vocab_size:
-                local_id = id
-            elif offset <= id < offset + vocab_size:
-                local_id = id - offset
-            else:
-                continue
-            tokens.extend(tokenizer.ids_to_tokens([local_id]))
-        return "".join(tokens).replace("▁", " ").strip()
-
-    def token_to_id(self, token, lang_id):
-        tokenizer = self.tokenizers_dict[lang_id]
-        return tokenizer.token_to_id(token) + self.token_id_offset[lang_id]
-
-    def ids_to_tokens(self, ids, lang_id):
-        tokenizer = self.tokenizers_dict[lang_id]
-        tokens = [tokenizer.ids_to_tokens([id])[0] for id in ids]
-
-        return tokens
-
-    def ids_to_text_and_langs(self, ids):
-        text_and_langs = []
-
-        for id in ids:
-            offset_id = self.offset_token_ids_by_token_id[id]
-            tokenizer = self.tokenizers_by_token_id[id]
-            token = tokenizer.ids_to_tokens([offset_id])[0]
-            text = token.replace("▁", " ")
-            text = text.strip()  # strip for display purposes
-            lang = self.langs_by_token_id[id]
-            text_and_langs.append({"char": text, "lang": lang})
-
-        return text_and_langs
-
-    def ids_to_words_and_langs(self, ids):
-        words_and_langs = []
-
-        word_ids = []  # tokens belonging to the current word
-        for id in ids:
-            offset_id = self.offset_token_ids_by_token_id[id]
-            tokenizer = self.tokenizers_by_token_id[id]
-            token = tokenizer.ids_to_tokens([offset_id])[0]
-            if token.startswith("▁"):
-                if len(word_ids) > 0:  # if this isn't the first word
-                    word = self.ids_to_text(word_ids)
-                    word = word.strip()  # strip for display purposes
-                    lang = self.ids_to_lang(word_ids)
-                    wl = {"word": word, "lang": lang}
-                    words_and_langs.append(wl)
-                word_ids = []
-            word_ids.append(id)
-
-        if len(word_ids) > 0:  # the last tokens
-            word = self.ids_to_text(word_ids)
-            word = word.strip()  # strip for display purposes
-            lang = self.ids_to_lang(word_ids)
-            wl = {"word": word, "lang": lang}
-            words_and_langs.append(wl)
-
-        return words_and_langs
-
-    def ids_to_lang(self, ids):
-        lang_cnts = {}
-
-        for id in ids:
-            lang = self.langs_by_token_id[id]
-            lang_cnt = lang_cnts.get(lang)
-            if lang_cnt is not None:
-                lang_cnts[lang] = lang_cnt + 1
-            else:
-                lang_cnts[lang] = 1
-
-        max_lang = ""
-        max_lang_cnt = -1
-        for lang, lang_cnt in lang_cnts.items():
-            if lang_cnt > max_lang_cnt:
-                max_lang = lang
-                max_lang_cnt = lang_cnt
-
-        return max_lang
-
-    def tokens_to_ids(
-        self, tokens: Union[str, List[str]], langs: Union[str, List[str]]
-    ) -> Union[int, List[int]]:
-        if isinstance(tokens, str):
-            tokens = [tokens]
-        if isinstance(langs, str):
-            langs = [langs]
-
-        ids = []
-        for i, token in enumerate(tokens):
-            lang_id = langs[i]
-            ids.append(self.token_to_id(token, lang_id))
-        return ids
-
-    @property
-    def vocab(self):
-        return self.vocabulary
-
-    @property
-    def langs(self):
-        return list(self.tokenizers_dict.keys())
+                if tokenizer is None:
+                    f.write("{w}\t{s}\n".format(w=word, s=" ".join(word)))
+                else:
+                    w_ids = tokenizer.text_to_ids(word)
+                    if tokenizer.unk_id not in w_ids:
+                        f.write(
+                            "{w}\t{s}\n".format(
+                                w=word, s=" ".join(tokenizer.text_to_tokens(word))
+                            )
+                        )
