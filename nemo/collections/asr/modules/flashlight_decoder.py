@@ -25,7 +25,7 @@ from nemo.core.classes import NeuralModule
 
 class _TokensWrapper:
     def __init__(
-        self, vocabulary: List[str], tokenizer: TokenizerSpec, lang_id: str = "ne"
+        self, vocabulary: List[str], tokenizer: TokenizerSpec, lang_id: str = None
     ):
         self.vocabulary = vocabulary
         self.tokenizer = tokenizer
@@ -33,6 +33,13 @@ class _TokensWrapper:
         self._is_multilingual = tokenizer is not None and hasattr(
             tokenizer, "tokenizers_dict"
         )
+
+        if self._is_multilingual and lang_id is None:
+            raise ValueError(
+                "lang_id must be provided when using a MultilingualTokenizer. "
+                "Pass lang_id to change_decoding_strategy() e.g. lang_id='ne'."
+            )
+
         if tokenizer is None:
             self.reverse_map = {
                 self.vocabulary[i]: i for i in range(len(self.vocabulary))
@@ -75,6 +82,10 @@ class _TokensWrapper:
             return -1
         if self.tokenizer is not None:
             if self._is_multilingual:
+                if self._lang_id is None:
+                    raise ValueError(
+                        "lang_id is not set on _TokensWrapper for multilingual tokenizer."
+                    )
                 return self.tokenizer.token_to_id(token, lang_id=self._lang_id)
             return self.tokenizer.token_to_id(token)
         else:
@@ -83,6 +94,10 @@ class _TokensWrapper:
     def text_to_tokens(self, text: str):
         if self.tokenizer is not None:
             if self._is_multilingual:
+                if self._lang_id is None:
+                    raise ValueError(
+                        "lang_id is not set on _TokensWrapper for multilingual tokenizer."
+                    )
                 return self.tokenizer.text_to_tokens(text, lang_id=self._lang_id)
             return self.tokenizer.text_to_tokens(text)
         else:
@@ -141,9 +156,18 @@ class FlashLightKenLMBeamSearchDecoder(NeuralModule):
         super().__init__()
 
         self.criterion_type = CriterionType.CTC
-        self.tokenizer_wrapper = _TokensWrapper(
-            vocabulary, tokenizer, lang_id=getattr(tokenizer, "_lang_id", "ne")
+
+        lang_id = getattr(tokenizer, "_lang_id", None)
+        is_multilingual = tokenizer is not None and hasattr(
+            tokenizer, "tokenizers_dict"
         )
+        if is_multilingual and lang_id is None:
+            raise ValueError(
+                "MultilingualTokenizer detected but lang_id is not set on the tokenizer. "
+                "Call change_decoding_strategy(decoder_type='ctc', lang_id='ne') before using flashlight."
+            )
+        self.tokenizer_wrapper = _TokensWrapper(vocabulary, tokenizer, lang_id=lang_id)
+
         self.vocab_size = self.tokenizer_wrapper.vocab_size
         self.blank = self.tokenizer_wrapper.blank
         self.silence = self.tokenizer_wrapper.unk_id
